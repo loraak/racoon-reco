@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from ultralytics import YOLO
 
-from cliente_reconocimiento import ClienteReco, ClienteDesconocidos
+from cliente_reconocimiento import ClienteReco
 from fuente_video import FuenteVideo
 from utils.segmentacion import cuadro_cabeza
 
@@ -26,9 +26,9 @@ load_dotenv()
 
 VIDEO = False
 MAIN_CHANNEL = int(os.getenv("MAIN_CHANNEL", 101))
-NVR_USER = os.getenv("NVR_USER_POES")
-NVR_PASS = os.getenv("NVR_PASS_POES")
-NVR_IP = os.getenv("NVR_IP_POES")
+NVR_USER = os.getenv("NVR_USER_GENERAL")
+NVR_PASS = os.getenv("NVR_PASS_GENERAL")
+NVR_IP = os.getenv("NVR_IP_GENERAL")
 STREAMING = f"rtsp://{NVR_USER}:{NVR_PASS}@{NVR_IP}:554/Streaming/Channels/{MAIN_CHANNEL}01"
 RECO_URL = "http://localhost:8000"
 RECO_API_KEY = os.getenv("API_KEY_RECONOCIMIENTO")

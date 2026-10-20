@@ -44,7 +44,6 @@ MAX_BYTES = 4 * 1024 * 1024
 face_det = None
 recognizer = None
 LIMITE_EMBEDDING = 5
-pool = None
 CREADO_POR = "apiReconocimiento"
 
 # postgres maqneja candados "de aviso". Mientras una transacción tiene este candado, cualquier otra que lo pida espera a que termine.
@@ -65,7 +64,7 @@ DATABASE_ARGOS = os.getenv("DATABASE_ARGOS")
 @contextmanager
 def conexion():
     # pide una conexión al pool.
-    con = pool.getconn()
+    con = pool_argos.getconn()
     try:
         # entrega la conexión. La función se pausa mientras se ejecuta el código de adentro.
         yield con
@@ -76,7 +75,7 @@ def conexion():
         # vuelve a lanzar el error para que no se oculte. FasAPI lo convierte en una respuesta 500.
         raise
     finally:
-        pool.putconn(con)
+        pool_argos.putconn(con)
 
 # convierte el embedding al formato que entiende pgvector.
 def a_texto(emb):
@@ -167,7 +166,7 @@ def cara_mas_grande(caras):
 # para confirmar que se reconoce a alguien, se deben cumplir dos condiciones:
 # puntaje >= umbral: se parece lo suficiente.
 # margen >= MARGEN_MINIMO: le gana con ventaja clara. Es preferible que no sepa a que de malos resultados ¿? preguntar.
-def comparar(emb, confianza_cara, tid=None):
+def comparar(emb):
     # pide una conexión, convierte el embedding a texto y busca.
     with conexion() as con, con.cursor() as cur:
         filas = buscar(cur, a_texto(emb))
