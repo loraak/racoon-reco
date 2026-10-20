@@ -1,5 +1,8 @@
 import os
 
+from psycopg2.extras import Json
+from pydantic import BaseModel, Field
+
 try:
     import openvino
     os.add_dll_directory(os.path.join(os.path.dirname(openvino.__file__), "libs"))
@@ -9,7 +12,7 @@ except Exception:
 
 import secrets
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 import cv2
 import numpy as np
 from fastapi import FastAPI, HTTPException, Request, Query, Header
@@ -40,6 +43,15 @@ MIN_LADO_CARA = 35
 MAX_BYTES = 4 * 1024 * 1024
 face_det = None
 recognizer = None
+LIMITE_EMBEDDING = 5
+pool = None
+CREADO_POR = "apiReconocimiento"
+
+# postgres maqneja candados "de aviso". Mientras una transacción tiene este candado, cualquier otra que lo pida espera a que termine.
+# así, dos registros no ocurren al mismo tiempo y no se crean dos personas para la misma cara.
+LOCK_REGISTRO = 7201
+MODELO = "arcface_resnet" # para insertar dentro de la base de datos.
+DIMENSION = 512
 
 # comparación
 UMBRAL_CONOCIDO = 0.5
@@ -48,6 +60,31 @@ MARGEN_MINIMO = 0.05 # ventaja del 1er lugar al 2do.
 VECINOS = 20 # x cantidad de embeddings cercanos revisa antes de elegir a la persona.
 pool_argos = None
 DATABASE_ARGOS = os.getenv("DATABASE_ARGOS")
+
+# convierte la función en algo que se usa con with "with .. as".
+@contextmanager
+def conexion():
+    # pide una conexión al pool.
+    con = pool.getconn()
+    try:
+        # entrega la conexión. La función se pausa mientras se ejecuta el código de adentro.
+        yield con
+        # si el bloque with terminó bien, guarda los cambios.
+        con.commit()
+    except Exception:
+        con.rollback()
+        # vuelve a lanzar el error para que no se oculte. FasAPI lo convierte en una respuesta 500.
+        raise
+    finally:
+        pool.putconn(con)
+
+# convierte el embedding al formato que entiende pgvector.
+def a_texto(emb):
+    # el embedding puede llegar como lista o como arreglo, esto lo convierte siempre a arreglo de numpy
+    # ravel lo aplana a una sola fila.
+    emb = np.asarray(emb, dtype=np.float32).ravel()
+    emb = emb / np.linalg.norm(emb)
+    return str(emb.tolist())
 
 # PASO 1.
 # with, as... define tablas temporales que solo existen mientras corre la consulta.
@@ -112,6 +149,10 @@ ORDER BY pp.prom_top3 DESC
 LIMIT 2
 """
 
+def buscar(cur, emb_texto):
+    cur.execute(SQL_BUSCAR, {"emb": emb_texto, "k": VECINOS})
+    return cur.fetchall()
+
 def cargar_modelos():
     global face_det, recognizer, pool_argos
     print("Cargando modelos...")
@@ -127,32 +168,65 @@ def cara_mas_grande(caras):
 # puntaje >= umbral: se parece lo suficiente.
 # margen >= MARGEN_MINIMO: le gana con ventaja clara. Es preferible que no sepa a que de malos resultados ¿? preguntar.
 def comparar(emb, confianza_cara, tid=None):
-    emb = emb / np.linalg.norm(emb)
-    emb_texto = str(emb.tolist())
-    con = pool_argos.getconn()
-    try:
-        with con.cursor() as cur:
-            cur.execute(SQL_BUSCAR, {"emb": emb_texto, "k": VECINOS})
-            filas = cur.fetchall()
-    finally:
-        pool_argos.putconn(con)
+    # pide una conexión, convierte el embedding a texto y busca.
+    with conexion() as con, con.cursor() as cur:
+        filas = buscar(cur, a_texto(emb))
 
+    # si no hay resultados, no hay a quién reconocer, regresa nadie con similitud 0.
     if not filas:
         return None, 0.0
 
+    # toma la primera fila (primer lugar) y reparte los 6 valores en variables. _ significa que se van a ignorar.
     _, nombre, tipo, _, prom_top3, _ = filas[0]
     puntaje = float(prom_top3)
-    segundo = float(filas[1][4]) if len(filas) > 1 else 0.0
-    margen = puntaje - segundo
+    segundo = float(filas[1][4] if len(filas) > 1 else 0.0)
 
     umbral = UMBRAL_CONOCIDO if tipo == "conocido" else UMBRAL_DESCONOCIDO
-    paso = puntaje >= umbral and margen >= MARGEN_MINIMO
 
-    #auditar(tipo, puntaje, nombre, paso, confianza_cara, tid)
+    # paso es verdad solo si se pasan dos condiciones:
+    # se parece lo suficiente (puntaje >= umbral)
+    # saca vnetaja clara al segundo lugar.
+    paso = puntaje >= umbral and (puntaje - segundo) >= MARGEN_MINIMO
+
     return (nombre if paso else None), puntaje
 
-    #def auditar(tipo, similitud, resultado, paso, confianza_cara, tid):
-    #con = pool_conocidos.getconn()
+def agregar_embedding (cur, persona_id, emb_texto, calidad, ruta_crop, metadata):
+    # for update bloquea la fila de la persona hasta que la transacción termine.
+    cur.execute("SELECT tipo FROM argos.persona_identificada WHERE id = %s FOR UPDATE", (persona_id, ))
+
+    # devuelve el id.
+    cur.execute(
+        "INSERT INTO vector.rostro_persona "
+        "(persona_identificada_id, embedding, imagen_url, modelo_embedding, dimension, "
+        "status, calidad, metadata, created_at, updated_at, created_by, updated_by) "
+        "VALUES (%s, %s::vector, %s, %s, %s, 'activo', %s, %s, now(), now(), %s, %s) " 
+        "RETURNING id",
+        (persona_id, emb_texto, ruta_crop or "", MODELO, DIMENSION, calidad, Json(metadata), CREADO_POR, CREADO_POR))
+    nuevo_id = cur.fetchone()[0]
+
+    # ¿qué embeddings sobran?
+    # where -> solo los embeddings que no son "fijos" -> probablemente se quite, no sée.....
+    # order by -> ordenador de mejor a peor calidad.
+    # null -> lo que notienen calidad van al final.
+    # created at... -> si dos tienen la misma calidad, el más reciente va primero.
+    # offset -> se salta los primeros N y devuelve el resto. Estos son los sobrantes.
+    cur.execute(
+        "DELETE FROM vector.rostro_persona e "
+        "USING ( "
+        "       SELECT id FROM vector.rostro_persona "
+        "       WHERE persona_identificada_id = %s AND NOT fijo "
+        "       ORDER BY calidad DESC NULLS LAST, created_at DESC "
+        "       OFFSET %s "
+        ") sobrantes "
+        "WHERE e.id = sobrantes.id "
+        "RETURNING e.id",
+        (persona_id, LIMITE_EMBEDDING)
+    )
+    borrados = {f[0] for f in cur.fetchall()}
+
+    # regresa dos valores: nuevo_id: el id del embedding insertado. nuevo_id not in borrados: t/f -> si el nuevo sobrevivió/ false si era el peor y se borró.
+    return nuevo_id, nuevo_id not in borrados
+
 
 UMBRAL_CONFIANZA_EMBEDDING = 0.7
 # se recibe una imagen, busca la cara + grande, la reconoce contra la base de datos y devuelve un diccionario con el resultado y CUÁNTO tardó.
@@ -161,9 +235,12 @@ UMBRAL_CONFIANZA_EMBEDDING = 0.7
 def procesar(img, modo, tid=None):
     t0 = time.perf_counter()
     caras = face_det.detect(img)
+
     if not caras:
         return {"cara": False, "ms": round((time.perf_counter() - t0) * 1000, 1)}
+
     cara = cara_mas_grande(caras)
+
     # toma las 4 coordenass y las convierte en float de python.
     # Importante para la API ya que Numpy no se puede convertir a JSON directamente.
     x1, y1, x2, y2 = [float(v) for v in cara.bbox[:4]]
@@ -172,6 +249,7 @@ def procesar(img, modo, tid=None):
     base = {"cara": True, "lado": round(lado, 1),
             "confianza_cara": round(float(cara.confidence), 4),
             "bbox": [x1, y1, x2, y2]}
+
     if lado < MIN_LADO_CARA:
         # se arma el diccionario con los datos de la cara y luego update agrega Nombre = None, score=0.0 y motivo.
         base.update(nombre=None, score=0.0, motivo="cara_pequena")
@@ -182,15 +260,19 @@ def procesar(img, modo, tid=None):
         emb = np.asarray(recognizer.get_normalized_embedding(img, cara.landmarks),
                          dtype=np.float32).ravel()
         # acá compara contra la base.
-        n, score = comparar(emb, float(cara.confidence), tid)
+        n, score = comparar(emb)
+
+        front = frontalidad(cara.landmarks)
+
         # devuelve el nombre o None y score de similitud.
-        base.update(nombre=n or "Desconocido", score=round(score, 4))
-        base["frontalidad"] = round(float(max(
-            desvio_nariz(cara.landmarks),
-            desvio_vertical(cara.landmarks)
-        )), 4)
-        if n is None:
+        base.update(nombre=n or "Desconocido",
+                    score=round(score, 4),
+                    frontalidad=round(float(front), 4),
+                    calidad=round(calcular_calidad(cara.confidence, front), 4))
+
+        if n is None or n.startswith("Desconocido#"):
             base["embedding"] = emb.tolist()
+
     # devuelve el tiempo y devuelve el diccionario.
     base["ms"] = round((time.perf_counter() - t0) * 1000, 1)
     return base
@@ -206,7 +288,7 @@ def desvio_nariz(landmarks):
     if dist_ojos < 1e-3:
         return 1.0
     # mide que tan lejos está la nariz del punto medio
-    return abs(nariz[0] - centro_ojos_x)
+    return abs(nariz[0] - centro_ojos_x) / dist_ojos
 
 def desvio_vertical(landmarks):
     ojo_izq, ojo_der = landmarks[0], landmarks[1]
@@ -219,8 +301,14 @@ def desvio_vertical(landmarks):
     if dist_ojos_boca < 1e-3:
         return 1.0
 
-    punto_medio_y = (centro_ojos_y - centro_boca_y) / 2
-    return abs(nariz[1] - punto_medio_y) / dist_ojos_boca
+    posicion = (nariz[1] - centro_ojos_y) / dist_ojos_boca
+    return abs(posicion - 0.5)
+
+def frontalidad(landmarks):
+    return max(desvio_nariz(landmarks), desvio_vertical(landmarks))
+
+def calcular_calidad(confianza, frontalidad):
+    return float(confianza) * (1.0 - min(float(frontalidad), 1.0))
 
 # API.
 # Carga los modelos una sola vez al arrancar.
@@ -237,6 +325,12 @@ app = FastAPI(title="Reconocimiento", lifespan=lifespan)
 def _verificar_clave(clave):
     if not API_KEY or not clave or not secrets.compare_digest(clave, API_KEY):
         raise HTTPException(status_code=401, detail="clave inválida")
+
+class PeticionDesconocido(BaseModel):
+    embedding: list[float] = Field(min_length=512, max_length=512)
+    canal: int = Field(ge=1)
+    calidad: float | None = None
+    ruta_crop: str | None = None
 
 # registra la función.
 # le dice a fastapi que ese parámetro no viene de la URL, sino de un encabezado HTTTP.
@@ -272,6 +366,10 @@ async def reconocer(request: Request, modo: str = Query("vivo", pattern="vivo"),
         raise HTTPException(status_code=400, detail="no se pudo decodificar la imagen")
     return await run_in_threadpool(procesar, img, modo, tid)
 
+@app.post("/registrar-desconocido")
+def registrar(p: PeticionDesconocido, x_api_key: str = Header(default="")):
+    _verificar_clave(x_api_key)
+    return registrar(p.embedding, p.canal, p.calidad, p.ruta_crop)
 
 if __name__ == "__main__":
     import uvicorn

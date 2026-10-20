@@ -34,8 +34,8 @@ RECO_URL = "http://localhost:8000"
 RECO_API_KEY = os.getenv("API_KEY_RECONOCIMIENTO")
 HD_URL = os.getenv("URL_HD")
 HD_API_KEY = os.getenv("API_KEY_HD")
-DESCONOCIDOS_URL = os.getenv("URL_DESCONOCIDOS")
-DESCONOCIDOS_API_KEY = os.getenv("API_KEY_DESCONOCIDOS")
+#DESCONOCIDOS_URL = os.getenv("URL_DESCONOCIDOS")
+#DESCONOCIDOS_API_KEY = os.getenv("API_KEY_DESCONOCIDOS")
 
 CAP_ACTIVO = True
 ESPERA_ENTRE_CAPS = 2.0
@@ -75,7 +75,7 @@ dib_lock = threading.Lock()
 running = True
 cliente = None
 cliente_hd = None
-cliente_desc = None
+#cliente_desc = None
 fuente_global = None
 
 CARPETA_DESCONOCIDOS = "capturas_desconocidos"
@@ -86,7 +86,7 @@ def nuevo_estado():
             "confirmado": False, "pendiente": False, "ultimo_intento": 0.0, "visto": time.time(),
             "hd_ok": False, "hd_pendiente": False, "hd_intentos": 0, "hd_ultimo": 0.0,
             "desconocido_guardado": False,
-            "mejor_embedding": None, "mejor_frontalidad": float("inf"), "mejor_crop": None}
+            "mejor_embedding": None, "mejor_frontalidad": float("inf"), "mejor_crop": None, "mejor_calidad": None}
 
 # PARA ENTENDERME. Proceso hasta llegar a este método.
 # YOLO procesa frame, encuentra persona con tid = 17 + confianza 0.85 y no hay petición pendiente para ese tid.
@@ -123,7 +123,7 @@ def decidir_nombre(st):
     # guarda el score más alto entre los votos que coinciden con la variante elegida nombre dentro del grupo ganador.
     st["score"] = max(s for m, s in votos_grupo if m == nombre)
 
-def agregar_voto(tid, nombre, score, embedding=None, frontalidad=None, crop=None, peso=1, origen="vivo"):
+def agregar_voto(tid, nombre, score, embedding=None, frontalidad=None, crop=None, calidad=None, peso=1, origen="vivo"):
     with personas_lock:
         st = personas.get(tid)
         if st is None:
@@ -144,13 +144,14 @@ def agregar_voto(tid, nombre, score, embedding=None, frontalidad=None, crop=None
         # si el nombre resultante cambió respecto al que tenía antes, lo imprime en consola con el origen.
         if st["nombre"] != anterior:
             print(f"[{origen}] ID {tid}: {st['nombre']} (score {score:.3f})")
-        if (embedding is not None and frontalidad is not None and frontalidad < st["mejor_frontalidad"]):
+        if embedding is not None and frontalidad is not None and frontalidad < st["mejor_frontalidad"]:
             # están separados porque c/u tiene su propia comparación.
             st["mejor_embedding"] = embedding
             st["mejor_frontalidad"] = frontalidad
             # se va a tomar el crop con el mejor puntaje en frontalidad.
             # la condición es < porque va al revés ¿? o sea, ahorita si sale 1 significa que hay mucha discrepancia en un rostro frontal.
             st["mejor_crop"] = crop
+            st["mejor_calidad"] = calidad
 
         # condición para guardar a un desconocido -> que ya esté confirmado, que el nombre sea literalmente "Desconocido".
         # que no se haya guardado para este track,.
@@ -160,7 +161,7 @@ def agregar_voto(tid, nombre, score, embedding=None, frontalidad=None, crop=None
                 and st["mejor_frontalidad"] <= 0.25):
             try:
                 print(f"frontalidad -> {st["mejor_frontalidad"]}")
-                cola_desconocidos.put_nowait((tid, st["mejor_embedding"], st["mejor_crop"]))
+                cola_desconocidos.put_nowait((tid, st["mejor_embedding"], st["mejor_crop"], st["mejor_calidad"]))
                 st["desconocido_guardado"] = True
             except queue.Full:
                 pass
@@ -234,6 +235,7 @@ def reco_worker():
                 resultado = (r["nombre"], r["score"])
                 embedding = r.get("embedding")
                 frontalidad = r.get("frontalidad")
+                calidad = r.get("calidad")
         except Exception as e:
             print(f"[reconocimiento] error: {e}")
         with personas_lock:
@@ -241,12 +243,12 @@ def reco_worker():
             if st is not None:
                 st["pendiente"] = False
         if resultado:
-            agregar_voto(tid, *resultado, embedding=embedding, crop=crop, frontalidad=frontalidad, peso=1, origen="vivo")
+            agregar_voto(tid, *resultado, embedding=embedding, crop=crop, frontalidad=frontalidad, calidad=calidad, peso=1, origen="vivo")
 
 def desconocido_worker():
     while running:
         try:
-            tid, embedding, crop = cola_desconocidos.get(timeout=0.5)
+            tid, embedding, crop, calidad = cola_desconocidos.get(timeout=0.5)
         except queue.Empty:
             continue
         ruta_crop = None
@@ -258,7 +260,7 @@ def desconocido_worker():
             except Exception as e:
                 print(f"[desconocido] no se pudo guardar el crop -> error: {e}")
         try:
-            r = cliente_desc.registrar(embedding, canal=MAIN_CHANNEL, ruta_crop=ruta_crop)
+            r = cliente.registrar(embedding, canal=MAIN_CHANNEL, calidad=calidad, ruta_crop=ruta_crop)
             if r:
                 print(f"[desconocido] ID {tid} -> {r}")
         except Exception as e:
@@ -385,12 +387,12 @@ def stream():
     return StreamingResponse(generar_stream(), media_type="multipart/x-mixed-replace; boundary=frame")
 
 def main():
-    global running, cliente, cliente_hd, cliente_desc, fuente_global
+    global running, cliente, cliente_hd, fuente_global
     if not RECO_API_KEY:
         raise SystemExit("Define la variable API_KEY")
     cliente = ClienteReco(RECO_URL, RECO_API_KEY)
     cliente_hd = ClienteReco(HD_URL, HD_API_KEY, canal = MAIN_CHANNEL)
-    cliente_desc = ClienteDesconocidos(DESCONOCIDOS_URL, DESCONOCIDOS_API_KEY)
+    #cliente_desc = ClienteDesconocidos(DESCONOCIDOS_URL, DESCONOCIDOS_API_KEY)
     print(f"Servidor de reconocimiento: {RECO_URL} -> "
           f"{'responde' if cliente.disponible() else 'NO responde por ahora (se seguirá intentando)'}")
 
