@@ -47,7 +47,6 @@ UMBRAL_DESCONOCIDO = 0.5
 MARGEN_MINIMO = 0.05 # ventaja del 1er lugar al 2do.
 VECINOS = 20 # x cantidad de embeddings cercanos revisa antes de elegir a la persona.
 pool_argos = None
-pool_conocidos = None
 DATABASE_ARGOS = os.getenv("DATABASE_ARGOS")
 
 # PASO 1.
@@ -114,11 +113,10 @@ LIMIT 2
 """
 
 def cargar_modelos():
-    global pool_conocidos, face_det, recognizer, pool_argos
+    global face_det, recognizer, pool_argos
     print("Cargando modelos...")
     face_det = SCRFD(model_name=SCRFDWeights.SCRFD_10G_KPS, confidence_threshold=0.5, input_size=(320, 320), providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
     recognizer = ArcFace(model_name=ArcFaceWeights.RESNET, providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
-    pool_conocidos = ThreadedConnectionPool(1, 5, DATABASE_URL)
     pool_argos = ThreadedConnectionPool(1, 5, DATABASE_ARGOS)
     print("Listo")
 
@@ -245,13 +243,13 @@ def _verificar_clave(clave):
 @app.get("/salud")
 def salud(x_api_key: str = Header(default="")):
     _verificar_clave(x_api_key)
-    con = pool_conocidos.getconn()
+    con = pool_argos.getconn()
     try:
         with con.cursor() as cur:
-            cur.execute("SELECT count(*) FROM rostros_conocidos")
+            cur.execute("SELECT count(*) FROM persona_identificada")
             total = cur.fetchone()[0]
     finally:
-        pool_conocidos.putconn(con)
+        pool_argos.putconn(con)
     return {"ok": True, "fotos_en_base": total, "umbral": UMBRAL_CONOCIDO}
 
 # este es el que recibe una imagen, la manda a procesar y devuelve el resultado.
