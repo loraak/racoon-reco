@@ -26,9 +26,9 @@ load_dotenv()
 
 VIDEO = False
 MAIN_CHANNEL = int(os.getenv("MAIN_CHANNEL", 101))
-NVR_USER = os.getenv("NVR_USER_GENERAL")
-NVR_PASS = os.getenv("NVR_PASS_GENERAL")
-NVR_IP = os.getenv("NVR_IP_GENERAL")
+NVR_USER = os.getenv("NVR_USER_POES")
+NVR_PASS = os.getenv("NVR_PASS_POES")
+NVR_IP = os.getenv("NVR_IP_POES")
 STREAMING = f"rtsp://{NVR_USER}:{NVR_PASS}@{NVR_IP}:554/Streaming/Channels/{MAIN_CHANNEL}01"
 RECO_URL = "http://localhost:8000"
 RECO_API_KEY = os.getenv("API_KEY_RECONOCIMIENTO")
@@ -402,7 +402,7 @@ def main():
         print("No llegó video en 30s... :'v")
 
     threading.Thread(target=tracker_worker, args=(fuente, detector), daemon=True).start()
-    threading.Thread(target=hd_worker, daemon=True).start()
+    #threading.Thread(target=hd_worker, daemon=True).start()
     threading.Thread(target=reco_worker, daemon=True).start()
     threading.Thread(target=desconocido_worker, daemon=True).start()
 
