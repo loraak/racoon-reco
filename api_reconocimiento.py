@@ -34,81 +34,127 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 API_KEY = os.getenv("API_KEY_RECONOCIMIENTO")
 RECO_DEVICE = os.getenv("DEVICE")
 
-UMBRAL = 0.5
 MIN_LADO_CARA = 35
+
 # ?
 MAX_BYTES = 4 * 1024 * 1024
 face_det = None
 recognizer = None
-pool_conocidos = None
 
-"""
-def forzar_openvino(modelo, dispositivo):
-    import onnxruntime as ort
-    if dispositivo == "CPU":
-        return
-    for nombre, sesion in vars(modelo).items():
-        if isinstance(sesion, ort.InferenceSession):
-            opciones = { "device_type": dispositivo, "precision": "FP16", "cache_dir" : "ov_cache" }
-            nueva = ort.InferenceSession(session._model_path, providers = [("OpenVINOExecutionProvider", opciones), "CPUExecutionProvider"])
-            setattr(modelo, nombre, nueva)
-            print(f"{type(modelo).__name__}: {nueva.get_providers()}")
-            return
-    print(f"{type(modelo).__name__}: no se encontró la sesión, se queda en CPU :P")
+# comparación
+UMBRAL_CONOCIDO = 0.5
+UMBRAL_DESCONOCIDO = 0.5
+MARGEN_MINIMO = 0.05 # ventaja del 1er lugar al 2do.
+VECINOS = 20 # x cantidad de embeddings cercanos revisa antes de elegir a la persona.
+pool_argos = None
+pool_conocidos = None
+DATABASE_ARGOS = "postgresql://dev_karol:134340@HOST:5432/argos_db"
+
+# PASO 1.
+# with, as... define tablas temporales que solo existen mientras corre la consulta.
+# cada una usa el resultado de la anterior: vecinos -> ordenados -> por_persona -> final.
+# k es el límite de embeddings, toma el valor de "VECINOS" (o sea 20).
+# embedding <=> es la distancia coseno. 0 -> idénticas.
+# 1 - x es la similitud: 1 significa que son idénticas.
+# "k" se queda con las k fotos más parecidas de toda la tabla, sin importar de quién sean.
+# emb se trata de los 512 vectores.
+
+# PASO 2.
+# De la tabla que acabamos de crear (vecinos).
+# patition by pid separa las filas en grupos, uno por persona.
+# order by ordena cada grupo de la foto más parecida a la menos parecida.
+# row... las numera 1, 2, 3, dentro de cada grupo.
+# pid -> sim -> rn
+# Tenna -> 0.71 -> 1
+# Tenna -> 0.66 -> 2
+# Otro -> 0.69 -> 1
+# Otro -> 0.45 -> 2
+
+# PASO 3.
+# por persona.
+# junta todas las filas de cada persona en una sola. Para c/u calcula tres cosas:
+# mejor -> la foto más parecida.
+# prom_top3 -> el promedio de las 3 fotos más parecidas. FILTER (WHERE rn <= 3) toma solo las filas numeradas. Si hay menos de 3, promedia las que haya.
+# votos -> cuántas de las k fotos cercanas son suyas.
+# pid -> mejor -> prom_top3 -> votos
+# Tenna -> 0.71 -> 0.67 (ejemplo) -> 2
+# Otro -> 0.69 -> 0.57 (ejemplo) -> 2
+# para evitar coincidencias y tenerlo todo promediado mejor.
+
+# PASO 4.
+# JOIN une esos puntajes con la tabla de personas para obtener nombre y tipo.
+# CASE arma el nombre
+# order by... regresa al primer y segunda lugar. El segundo sirve para medir el margen en Python.
+SQL_BUSCAR = """
+WITH vecinos as (
+    SELECT persona_identificada AS pid, 1 - (embedding <=> %(emb)s::vector) AS sim 
+    FROM vector.rostro_persona 
+    ORDER BY embedding <=> %(emb)s::vector 
+    LIMIT %(k)s
+), 
+ordenados AS (
+    SELECT pid, sim, row_number() OVER (PARTITION BY pid ORDER BY sim DESC) AS rn 
+    FROM vecinos
+), 
+por_persona AS (
+    SELECT pid, max(sim) AS mejor, avg(sim) FILTER (WHERE rn <=3) AS prom_top3, count(*) AS votos 
+    FROM ordenados 
+    GROUP BY pid  
+)
+SELECT p.id, 
+    CASE WHEN p.tipo = 'conocido' 
+         THEN concat_ws(' ', p.nombre) 
+         ELSE 'Desconocido #' || p.id 
+    END AS nombre, 
+    p.tipo, pp.mejor, pp.prom_top3, pp.votos 
+FROM por_persona pp 
+JOIN argos.persona_identificada p ON P.id = pp.id 
+ORDER BY pp.prom_top3 DESC 
+LIMIT 2
 """
 
 def cargar_modelos():
-    global pool_conocidos, face_det, recognizer
+    global pool_conocidos, face_det, recognizer, pool_argos
     print("Cargando modelos...")
     face_det = SCRFD(model_name=SCRFDWeights.SCRFD_10G_KPS, confidence_threshold=0.5, input_size=(320, 320), providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
     recognizer = ArcFace(model_name=ArcFaceWeights.RESNET, providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
     pool_conocidos = ThreadedConnectionPool(1, 5, DATABASE_URL)
+    pool_argos = ThreadedConnectionPool(1, 5, DATABASE_ARGOS)
     print("Listo")
 
 def cara_mas_grande(caras):
     return max(caras, key=lambda c: (c.bbox[2] - c.bbox[0]) * (c.bbox[3] - c.bbox[1]))
 
+# para confirmar que se reconoce a alguien, se deben cumplir dos condiciones:
+# puntaje >= umbral: se parece lo suficiente.
+# margen >= MARGEN_MINIMO: le gana con ventaja clara. Es preferible que no sepa a que de malos resultados ¿? preguntar.
 def comparar(emb, confianza_cara, tid=None):
     emb = emb / np.linalg.norm(emb)
     emb_texto = str(emb.tolist())
-
-    con = pool_conocidos.getconn()
+    con = pool_argos.getconn()
     try:
-        # primer select -> tabla rostros_conocidos, cada fila es una persona conocida con su embedding guardado.
-        # persona se renombra como nombre, y se marca origen = "conocido".
-        # segundo select -> tabla rostros_desconocidos, cada fila es un desconocido guardado previamente (los que se
-        # mandan por cola_desconocidos). Se le arma un nombre usando el id de la fila y se marca origen = "desconocido".
         with con.cursor() as cur:
-            cur.execute(
-                "SELECT nombre, similitud, origen FROM ("
-                "  SELECT persona AS nombre, 1 - (embedding <=> %s::vector) AS similitud, 'conocido' AS origen"
-                "  FROM rostros_conocidos"
-                "  UNION ALL"
-                "  SELECT 'Desconocido#' || id AS nombre, 1 - (embedding <=> %s::vector) AS similitud, 'desconocido' AS origen"
-                "  FROM rostros_desconocidos"
-                ") t ORDER BY similitud DESC LIMIT 1",
-                (emb_texto, emb_texto))
-            fila = cur.fetchone()
-
-            if fila is not None:
-                nombre, similitud, origen = fila
-                umbral = UMBRAL
-                paso = similitud >= UMBRAL
-                cur.execute(
-                    "INSERT INTO auditoria_comparaciones "
-                    "(tipo, similitud, resultado, paso_umbral, confianza_cara, tid) "
-                    "VALUES (%s, %s, %s, %s, %s, %s)",
-                    (origen, float(similitud), nombre, paso, confianza_cara, tid))
-                con.commit()
-
+            cur.execute(SQL_BUSCAR, {"emb": emb_texto, "k": VECINOS})
+            filas = cur.fetchall()
     finally:
-        pool_conocidos.putconn(con)
+        pool_argos.putconn(con)
 
-    if fila is None:
+    if not filas:
         return None, 0.0
-    nombre, similitud, origen = fila
-    umbral = UMBRAL if origen == "conocido" else UMBRAL
-    return (nombre if similitud >= umbral else None), float(similitud)
+
+    _, nombre, tipo, _, prom_top3, _ = filas[0]
+    puntaje = float(prom_top3)
+    segundo = float(filas[1][4]) if len(filas) > 1 else 0.0
+    margen = puntaje - segundo
+
+    umbral = UMBRAL_CONOCIDO if tipo == "conocido" else UMBRAL_DESCONOCIDO
+    paso = puntaje >= umbral and margen >= MARGEN_MINIMO
+
+    #auditar(tipo, puntaje, nombre, paso, confianza_cara, tid)
+    return (nombre if paso else None), puntaje
+
+    #def auditar(tipo, similitud, resultado, paso, confianza_cara, tid):
+    #con = pool_conocidos.getconn()
 
 UMBRAL_CONFIANZA_EMBEDDING = 0.7
 # se recibe una imagen, busca la cara + grande, la reconoce contra la base de datos y devuelve un diccionario con el resultado y CUÁNTO tardó.
@@ -206,7 +252,7 @@ def salud(x_api_key: str = Header(default="")):
             total = cur.fetchone()[0]
     finally:
         pool_conocidos.putconn(con)
-    return {"ok": True, "fotos_en_base": total, "umbral": UMBRAL}
+    return {"ok": True, "fotos_en_base": total, "umbral": UMBRAL_CONOCIDO}
 
 # este es el que recibe una imagen, la manda a procesar y devuelve el resultado.
 # para entender los parámetros -> request es una clase de starlette (librería sobre la que se construye FastAPI).
