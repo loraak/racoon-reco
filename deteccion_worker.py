@@ -260,7 +260,7 @@ def desconocido_worker():
             except Exception as e:
                 print(f"[desconocido] no se pudo guardar el crop -> error: {e}")
         try:
-            r = cliente.registrar(embedding, canal=MAIN_CHANNEL, calidad=calidad, ruta_crop=ruta_crop)
+            r = cliente.registrar(embedding)
             if r:
                 print(f"[desconocido] ID {tid} -> {r}")
         except Exception as e:
