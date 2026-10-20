@@ -365,7 +365,7 @@ async def reconocer(request: Request, modo: str = Query("vivo", pattern="vivo"),
         raise HTTPException(status_code=400, detail="no se pudo decodificar la imagen")
     return await run_in_threadpool(procesar, img, modo, tid)
 
-@app.post("/registrar-desconocido")
+@app.post("/registrar")
 def registrar(p: PeticionDesconocido, x_api_key: str = Header(default="")):
     _verificar_clave(x_api_key)
     return registrar(p.embedding, p.canal, p.calidad, p.ruta_crop)
