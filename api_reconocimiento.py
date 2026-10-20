@@ -86,7 +86,7 @@ DATABASE_ARGOS = os.getenv("DATABASE_ARGOS")
 # order by... regresa al primer y segunda lugar. El segundo sirve para medir el margen en Python.
 SQL_BUSCAR = """
 WITH vecinos as (
-    SELECT persona_identificada AS pid, 1 - (embedding <=> %(emb)s::vector) AS sim 
+    SELECT persona_identificada_id AS pid, 1 - (embedding <=> %(emb)s::vector) AS sim 
     FROM vector.rostro_persona 
     ORDER BY embedding <=> %(emb)s::vector 
     LIMIT %(k)s
@@ -107,7 +107,7 @@ SELECT p.id,
     END AS nombre, 
     p.tipo, pp.mejor, pp.prom_top3, pp.votos 
 FROM por_persona pp 
-JOIN argos.persona_identificada p ON P.id = pp.id 
+JOIN argos.persona_identificada p ON p.id = pp.pid 
 ORDER BY pp.prom_top3 DESC 
 LIMIT 2
 """
