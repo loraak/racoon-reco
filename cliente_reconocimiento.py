@@ -70,7 +70,7 @@ class ClienteReco:
     def registrar(self, embedding, canal, calidad=None, ruta_crop=None):
         cuerpo = {"embedding": embedding, "canal": canal, "calidad": calidad, "ruta_crop": ruta_crop}
         try:
-            r = self.sesion.post(f"{self.url}/registrar", json=cuerpo, timeout=self.timeout)
+            r = self.sesion.post(f"{self.url}/registrar-desconocido", json=cuerpo, timeout=self.timeout)
             r.raise_for_status()
             return r.json()
         except (requests.RequestException, ValueError) as e:

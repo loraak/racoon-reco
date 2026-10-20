@@ -226,6 +226,8 @@ def agregar_embedding (cur, persona_id, emb_texto, calidad, ruta_crop, metadata)
     # regresa dos valores: nuevo_id: el id del embedding insertado. nuevo_id not in borrados: t/f -> si el nuevo sobrevivió/ false si era el peor y se borró.
     return nuevo_id, nuevo_id not in borrados
 
+def registrar_desconocido(emb, canal, calidad=None, ruta_crop=None):
+    emb_texto = a_texto(emb)
 
 UMBRAL_CONFIANZA_EMBEDDING = 0.7
 # se recibe una imagen, busca la cara + grande, la reconoce contra la base de datos y devuelve un diccionario con el resultado y CUÁNTO tardó.
@@ -365,10 +367,10 @@ async def reconocer(request: Request, modo: str = Query("vivo", pattern="vivo"),
         raise HTTPException(status_code=400, detail="no se pudo decodificar la imagen")
     return await run_in_threadpool(procesar, img, modo, tid)
 
-@app.post("/registrar")
+@app.post("/registrar-desconocido")
 def registrar(p: PeticionDesconocido, x_api_key: str = Header(default="")):
     _verificar_clave(x_api_key)
-    return registrar(p.embedding, p.canal, p.calidad, p.ruta_crop)
+    return registrar_desconocido(p.embedding, p.canal, p.calidad, p.ruta_crop)
 
 if __name__ == "__main__":
     import uvicorn
