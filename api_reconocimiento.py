@@ -48,7 +48,7 @@ MARGEN_MINIMO = 0.05 # ventaja del 1er lugar al 2do.
 VECINOS = 20 # x cantidad de embeddings cercanos revisa antes de elegir a la persona.
 pool_argos = None
 pool_conocidos = None
-DATABASE_ARGOS = "postgresql://dev_karol:134340@HOST:5432/argos_db"
+DATABASE_ARGOS = os.getenv("DATABASE_ARGOS")
 
 # PASO 1.
 # with, as... define tablas temporales que solo existen mientras corre la consulta.
