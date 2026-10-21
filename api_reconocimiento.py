@@ -33,13 +33,11 @@ load_dotenv()
 HOST = "0.0.0.0"
 PORT = 8000
 
-DATABASE_URL = os.getenv("DATABASE_URL")
 API_KEY = os.getenv("API_KEY_RECONOCIMIENTO")
-RECO_DEVICE = os.getenv("DEVICE")
 
 MIN_LADO_CARA = 35
 
-# ?
+# tamaño máximo de imagen aceptada (4 MB).
 MAX_BYTES = 4 * 1024 * 1024
 face_det = None
 recognizer = None
@@ -132,16 +130,16 @@ ordenados AS (
     FROM vecinos
 ), 
 por_persona AS (
-    SELECT pid, max(sim) AS mejor, avg(sim) FILTER (WHERE rn <=3) AS prom_top3, count(*) AS votos 
+    SELECT pid, avg(sim) FILTER (WHERE rn <=3) AS prom_top3
     FROM ordenados 
     GROUP BY pid  
 )
 SELECT p.id, 
     CASE WHEN p.tipo = 'conocido' 
-         THEN concat_ws(' ', p.nombre) 
-         ELSE 'Desconocido #' || p.id 
+         THEN p.nombre
+         ELSE 'Desconocido#' || p.id 
     END AS nombre, 
-    p.tipo, pp.mejor, pp.prom_top3, pp.votos 
+    p.tipo, pp.prom_top3
 FROM por_persona pp 
 JOIN argos.persona_identificada p ON p.id = pp.pid 
 ORDER BY pp.prom_top3 DESC 
@@ -176,9 +174,9 @@ def comparar(emb):
         return None, 0.0
 
     # toma la primera fila (primer lugar) y reparte los 6 valores en variables. _ significa que se van a ignorar.
-    _, nombre, tipo, _, prom_top3, _ = filas[0]
+    _, nombre, tipo, prom_top3 = filas[0]
     puntaje = float(prom_top3)
-    segundo = float(filas[1][4] if len(filas) > 1 else 0.0)
+    segundo = float(filas[1][3] if len(filas) > 1 else 0.0)
 
     umbral = UMBRAL_CONOCIDO if tipo == "conocido" else UMBRAL_DESCONOCIDO
 
@@ -191,7 +189,7 @@ def comparar(emb):
 
 def agregar_embedding (cur, persona_id, emb_texto, calidad, ruta_crop, metadata):
     # for update bloquea la fila de la persona hasta que la transacción termine.
-    cur.execute("SELECT tipo FROM argos.persona_identificada WHERE id = %s FOR UPDATE", (persona_id, ))
+    cur.execute("SELECT 1 FROM argos.persona_identificada WHERE id = %s FOR UPDATE", (persona_id, ))
 
     # devuelve el id.
     cur.execute(
@@ -232,18 +230,18 @@ def registrar_desconocido(emb, canal, calidad=None, ruta_crop=None):
 
     with conexion() as con, con.cursor() as cur:
         # acá se hace uso de la llave número que definimos antes...
-        cur.execute("SELECT pg_advisoty_xact_lock(%s)", (LOCK_REGISTRO,))
+        cur.execute("SELECT pg_advisory_xact_lock(%s)", (LOCK_REGISTRO,))
 
         filas = buscar(cur, emb_texto)
 
-        if filas and float(filas[0][4]) >= UMBRAL_DESCONOCIDO:
-            pid, nombre, tipo, _, prom_top3, _ = filas[0]
+        if filas and float(filas[0][3]) >= UMBRAL_DESCONOCIDO:
+            pid, nombre, tipo, prom_top3 = filas[0]
             similitud = round(float(prom_top3), 4)
 
             if tipo == "conocido":
                 return {"accion": "es_conocido", "persona_id": pid, "nombre": nombre, "similitud": similitud}
 
-            emb_id, conservado = agregar_embedding(cur, pid, emb_texto, calidad, ruta_crop, metadata)
+            _, conservado = agregar_embedding(cur, pid, emb_texto, calidad, ruta_crop, metadata)
             return {"accion": "agregado" if conservado else "descartado", "persona_id": pid, "nombre": nombre, "similitud": similitud}
 
         # persona nueva.
@@ -260,7 +258,7 @@ UMBRAL_CONFIANZA_EMBEDDING = 0.7
 # se recibe una imagen, busca la cara + grande, la reconoce contra la base de datos y devuelve un diccionario con el resultado y CUÁNTO tardó.
 # se convierte en un JSON para quien hizo la petición.
 # recibe la imagen en un Numpy en BGR y el parámetro de MODO.
-def procesar(img, modo, tid=None):
+def procesar(img):
     t0 = time.perf_counter()
     caras = face_det.detect(img)
 
@@ -368,7 +366,7 @@ def salud(x_api_key: str = Header(default="")):
     con = pool_argos.getconn()
     try:
         with con.cursor() as cur:
-            cur.execute("SELECT count(*) FROM persona_identificada")
+            cur.execute("SELECT count(*) FROM argos.persona_identificada")
             total = cur.fetchone()[0]
     finally:
         pool_argos.putconn(con)
@@ -384,7 +382,7 @@ def salud(x_api_key: str = Header(default="")):
 # Query permite agregar validaciones extra -> el primer argumento de Query(...) es el valor por defecto si el cliente no lo manda.
 # pattern es una validación: que el valor recibido coincida exactamente con el string "vivo".
 @app.post("/reconocer")
-async def reconocer(request: Request, modo: str = Query("vivo", pattern="vivo"), tid: int = Query(None), x_api_key: str = Header(default="")):
+async def reconocer(request: Request, x_api_key: str = Header(default="")):
     _verificar_clave(x_api_key)
     datos = await request.body()
     if not datos or len(datos) > MAX_BYTES:
@@ -392,7 +390,7 @@ async def reconocer(request: Request, modo: str = Query("vivo", pattern="vivo"),
     img = cv2.imdecode(np.frombuffer(datos, np.uint8), cv2.IMREAD_COLOR)
     if img is None:
         raise HTTPException(status_code=400, detail="no se pudo decodificar la imagen")
-    return await run_in_threadpool(procesar, img, modo, tid)
+    return await run_in_threadpool(procesar, img)
 
 @app.post("/registrar-desconocido")
 def registrar(p: PeticionDesconocido, x_api_key: str = Header(default="")):

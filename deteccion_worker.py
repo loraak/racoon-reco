@@ -82,7 +82,7 @@ CARPETA_DESCONOCIDOS = "capturas_desconocidos"
 os.makedirs(CARPETA_DESCONOCIDOS, exist_ok=True)
 
 def nuevo_estado():
-    return {"votos": deque(maxlen=VENTANA_VOTOS), "nombre": "...", "score": 0.0,
+    return {"votos": deque(maxlen=VENTANA_VOTOS), "nombre": "...",
             "confirmado": False, "pendiente": False, "ultimo_intento": 0.0, "visto": time.time(),
             "hd_ok": False, "hd_pendiente": False, "hd_intentos": 0, "hd_ultimo": 0.0,
             "desconocido_guardado": False,
@@ -121,7 +121,6 @@ def decidir_nombre(st):
     # si está confirmado, guarda el nombre tal cual; si no, lo marca con un ?
     st["nombre"] = nombre if st["confirmado"] else f"{nombre}?"
     # guarda el score más alto entre los votos que coinciden con la variante elegida nombre dentro del grupo ganador.
-    st["score"] = max(s for m, s in votos_grupo if m == nombre)
 
 def agregar_voto(tid, nombre, score, embedding=None, frontalidad=None, crop=None, calidad=None, peso=1, origen="vivo"):
     with personas_lock:
@@ -230,7 +229,7 @@ def reco_worker():
         resultado = None
         embedding = None
         try:
-            r = cliente.reconocer(crop, "vivo", tid = tid)
+            r = cliente.reconocer(crop)
             if r and r.get("nombre"):
                 resultado = (r["nombre"], r["score"])
                 embedding = r.get("embedding")
@@ -260,7 +259,7 @@ def desconocido_worker():
             except Exception as e:
                 print(f"[desconocido] no se pudo guardar el crop -> error: {e}")
         try:
-            r = cliente.registrar(embedding)
+            r = cliente.registrar(embedding, canal = MAIN_CHANNEL, calidad=calidad, ruta_crop=ruta_crop)
             if r:
                 print(f"[desconocido] ID {tid} -> {r}")
         except Exception as e:
@@ -270,7 +269,6 @@ def tracker_worker(fuente, detector):
     global latest_dib
     intervalo_min = 1.0/FPS_WORKER
     ultimo_fid = -1
-    vueltas, acum = 0, 0.0
 
     while running:
         t0 = time.perf_counter()
@@ -327,8 +325,6 @@ def tracker_worker(fuente, detector):
         with dib_lock:
             latest_dib = dib
 
-        vueltas += 1
-        acum += time.perf_counter() - t0
         time.sleep(max(0.0, intervalo_min - (time.perf_counter() - t0)))
 
 

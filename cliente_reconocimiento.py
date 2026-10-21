@@ -43,17 +43,14 @@ class ClienteReco:
         except requests.RequestException:
             return False
 
-    def reconocer(self, img, modo="vivo", tid=None):
+    def reconocer(self, img):
         if time.time() < self._pausa_hasta:
             return None
         ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, self.calidad])
         if not ok:
             return None
-        params = {"modo": modo}
-        if tid is not None:
-            params["tid"] = tid
         try:
-            r = self.sesion.post(f"{self.url}/reconocer", params=params, data=buf.tobytes(), timeout=self.timeout, headers={"Content-Type": "image/jpeg"})
+            r = self.sesion.post(f"{self.url}/reconocer", data=buf.tobytes(), timeout=self.timeout, headers={"Content-Type": "image/jpeg"})
             r.raise_for_status()
             if self._fallos:
                 print("[cliente-reconocimiento] servidor de reconocimiento de vuelta")
