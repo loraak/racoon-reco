@@ -232,7 +232,7 @@ def registrar_desconocido(emb, canal, calidad=None, ruta_crop=None):
 
     with conexion() as con, con.cursor() as cur:
         # acá se hace uso de la llave número que definimos antes...
-        cur.execute("SELECT pg_advisoty_xact_lock(%s)", (LOCK_REGISTRO,))
+        cur.execute("SELECT pg_advisory_xact_lock(%s)", (LOCK_REGISTRO,))
 
         filas = buscar(cur, emb_texto)
 
@@ -247,9 +247,9 @@ def registrar_desconocido(emb, canal, calidad=None, ruta_crop=None):
             return {"accion": "agregado" if conservado else "descartado", "persona_id": pid, "nombre": nombre, "similitud": similitud}
 
         # persona nueva.
-        cur.execute("INSERTO INTO argos.persona_identificada "
+        cur.execute("INSERT INTO argos.persona_identificada "
                     "(tipo, status, created_at, updated_at, created_by, updated_by) "
-                    "VALUES ('desconocido', 'activo', now(), now(), %s, &s) RETURNING id",
+                    "VALUES ('desconocido', 'activo', now(), now(), %s, %s) RETURNING id",
                     (CREADO_POR, CREADO_POR))
         pid = cur.fetchone()[0]
         agregar_embedding(cur, pid, emb_texto, calidad, ruta_crop, metadata)
