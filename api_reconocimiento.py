@@ -228,6 +228,33 @@ def agregar_embedding (cur, persona_id, emb_texto, calidad, ruta_crop, metadata)
 
 def registrar_desconocido(emb, canal, calidad=None, ruta_crop=None):
     emb_texto = a_texto(emb)
+    metadata = {"origen": "camara", "canal": canal}
+
+    with conexion() as con, con.cursor() as cur:
+        # acá se hace uso de la llave número que definimos antes...
+        cur.execute("SELECT pg_advisoty_xact_lock(%s)", (LOCK_REGISTRO,))
+
+        filas = buscar(cur, emb_texto)
+
+        if filas and float(filas[0][4]) >= UMBRAL_DESCONOCIDO:
+            pid, nombre, tipo, _, prom_top3, _ = filas[0]
+            similitud = round(float(prom_top3), 4)
+
+            if tipo == "conocido":
+                return {"accion": "es_conocido", "persona_id": pid, "nombre": nombre, "similitud": similitud}
+
+            emb_id, conservado = agregar_embedding(cur, pid, emb_texto, calidad, ruta_crop, metadata)
+            return {"accion": "agregado" if conservado else "descartado", "persona_id": pid, "nombre": nombre, "similitud": similitud}
+
+        # persona nueva.
+        cur.execute("INSERTO INTO argos.persona_identificada "
+                    "(tipo, status, created_at, updated_at, created_by, updated_by) "
+                    "VALUES ('desconocido', 'activo', now(), now(), %s, &s) RETURNING id",
+                    (CREADO_POR, CREADO_POR))
+        pid = cur.fetchone()[0]
+        agregar_embedding(cur, pid, emb_texto, calidad, ruta_crop, metadata)
+        return {"accion": "nuevo", "persona_id": pid, "nombre": f"Desconocido#{pid}"}
+
 
 UMBRAL_CONFIANZA_EMBEDDING = 0.7
 # se recibe una imagen, busca la cara + grande, la reconoce contra la base de datos y devuelve un diccionario con el resultado y CUÁNTO tardó.
