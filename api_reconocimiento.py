@@ -1,3 +1,5 @@
+from typing import Annotated
+
 from psycopg2.extras import Json
 from pydantic import BaseModel, Field
 import secrets
@@ -158,18 +160,60 @@ def comparar(emb):
         return None, 0.0
 
     # toma la primera fila (primer lugar) y reparte los 6 valores en variables. _ significa que se van a ignorar.
-    _, nombre, tipo, prom_top3 = filas[0]
+    pid, nombre, tipo, prom_top3 = filas[0]
     puntaje = float(prom_top3)
     segundo = float(filas[1][3] if len(filas) > 1 else 0.0)
 
     umbral = UMBRAL_CONOCIDO if tipo == "conocido" else UMBRAL_DESCONOCIDO
-
-    # paso es verdad solo si se pasan dos condiciones:
-    # se parece lo suficiente (puntaje >= umbral)
-    # saca vnetaja clara al segundo lugar.
     paso = puntaje >= umbral and (puntaje - segundo) >= MARGEN_MINIMO
 
-    return (nombre if paso else None), puntaje
+    if not paso:
+        return None, None, None, puntaje
+    return pid, nombre, tipo, puntaje
+
+def confirmar_persona(p):
+    # llamado una vez por tid cuando se confirma a alguien.
+    emb_texto = a_texto(p.embedding) if p.embedding is not None else None
+    meta_evento = {"tid": p.tid, "calidad": p.calidad, "frontalidad": p.frontalidad, "ruta_crop": p.ruta_crop}
+    meta_emb = {"origen": "camara", "camara_id": p.camara_id, "tid": p.tid}
+
+    with conexion() as con, con.cursor() as cur:
+        persona_id = p.persona_id
+        similitud = p.similitud
+
+        # desconocido sin registrar, otra confirmación.
+        if persona_id is None:
+            if emb_texto is None:
+                raise HTTPException(status_code=422, detail="Falta embedding")
+
+            cur.execute("SELECT pg_advisory_xact_lock(%s)", (LOCK_REGISTRO,))
+            filas = buscar(cur, emb_texto)
+
+            if filas and float(filas[0][3]) >= UMBRAL_DESCONOCIDO:
+                persona_id = filas[0][0]
+                similitud = float(filas[0][3])
+            else:
+                persona_id = crear_desconocido(cur)
+                emb_id, _ = agregar_embedding(cur, persona_id, emb_texto, p.calidad, p.ruta_crop, meta_emb)
+                evento_id = insertar_evento(cur, "registro", persona_id, p.camara.id, rostro_persona_id=emb_id, metadata=meta_evento)
+
+                return {"accion": "registro", "persona_id": persona_id,
+                        "nombre": f"Desconocido#{persona_id}", "evento_id": evento_id}
+
+        tipo = tipo_de(cur, persona_id)
+
+        # eventp detección
+        if tipo is None:
+            raise HTTPException(status_code=404, detail=f"no existe la persona {persona_id}")
+
+        evento_id = insertar_evento(cur, "deteccion", persona_id, p.camara_id, similitud=similitud, metadata=meta_evento)
+        resultado = {"accion": "deteccion", "persona_id": persona_id, "evento_id": evento_id}
+
+        if tipo == "desconocido" and emb_texto is not None:
+            emb_id, conservado = agregar_embedding(cur, persona_id, emb_texto, p.calidad, p.ruta_crop, meta_emb)
+            if conservado:
+                insertar_evento(cur, "embedding_agregado", persona_id, p.camara_id, rostro_persona_id=emb_id, metadata=meta_evento)
+            resultado["embedding"] = "agregado" if conservado else "descartado"
 
 def agregar_embedding (cur, persona_id, emb_texto, calidad, ruta_crop, metadata):
     # for update bloquea la fila de la persona hasta que la transacción termine.
@@ -207,6 +251,30 @@ def agregar_embedding (cur, persona_id, emb_texto, calidad, ruta_crop, metadata)
 
     # regresa dos valores: nuevo_id: el id del embedding insertado. nuevo_id not in borrados: t/f -> si el nuevo sobrevivió/ false si era el peor y se borró.
     return nuevo_id, nuevo_id not in borrados
+
+def crear_desconocido(cur):
+    cur.execute(
+        "INSERT INTO argos.persona_identificada "
+        "(tipo, status, created_at, updated_at, created_by, updated_by) "
+        "VALUES ('desconocido', 'activo', now(), now(), %s, %s) RETURNING id",
+        (CREADO_POR, CREADO_POR)
+    )
+    return cur.fetchone()[0]
+
+def tipo_de(cur, persona_id):
+    cur.execute("SELECT tipo FROM argos.persona_identificada WHERE id = %s", (persona_id,))
+    fila = cur.fetchone()
+    return fila[0] if fila else None
+
+def insertar_evento(cur, tipo, persona_id, camara_id, similitud=None, rostro_persona_id=None, metadata=None):
+    cur.execute(
+        "INSERT INTO argos.evento "
+        "(tipo, persona_id, camara_id, similitud, rostro_persona_id, metadata) "
+        "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
+        (tipo, persona_id, camara_id, similitud, rostro_persona_id, Json(metadata or {}))
+    )
+    return cur.fetchone()[0]
+
 """
 def registrar_desconocido(emb, canal, calidad=None, ruta_crop=None):
     emb_texto = a_texto(emb)
@@ -269,17 +337,18 @@ def procesar(img):
         emb = np.asarray(recognizer.get_normalized_embedding(img, cara.landmarks),
                          dtype=np.float32).ravel()
         # acá compara contra la base.
-        n, score = comparar(emb)
+        pid, n, tipo, score = comparar(emb)
 
         front = frontalidad(cara.landmarks)
 
         # devuelve el nombre o None y score de similitud.
-        base.update(nombre=n or "Desconocido",
+        base.update(persona_id=pid,
+                    nombre=n or "Desconocido",
                     score=round(score, 4),
                     frontalidad=round(float(front), 4),
                     calidad=round(calcular_calidad(cara.confidence, front), 4))
 
-        if n is None or n.startswith("Desconocido#"):
+        if pid is None or tipo == "desconocido":
             base["embedding"] = emb.tolist()
 
     # devuelve el tiempo y devuelve el diccionario.
@@ -335,10 +404,15 @@ def _verificar_clave(clave):
     if not API_KEY or not clave or not secrets.compare_digest(clave, API_KEY):
         raise HTTPException(status_code=401, detail="clave inválida")
 
-class PeticionDesconocido(BaseModel):
-    embedding: list[float] = Field(min_length=512, max_length=512)
-    canal: int = Field(ge=1)
+Embedding512 = Annotated[list[float], Field(min_length=512, max_length=512)]
+
+class PeticionConfirmar(BaseModel):
+    camara_id: int = Field(ge=1)
+    persona_id: int | None = None
+    embedding: Embedding512 | None = None
+    similitud: float | None = None
     calidad: float | None = None
+    frontalidad: float | None = None
     ruta_crop: str | None = None
 
 # registra la función.
@@ -374,6 +448,12 @@ async def reconocer(request: Request, x_api_key: str = Header(default="")):
     if img is None:
         raise HTTPException(status_code=400, detail="no se pudo decodificar la imagen")
     return await run_in_threadpool(procesar, img)
+
+@app.post("/confirmar")
+def confirmar(p: PeticionConfirmar, x_api_key: str = Header(default="")):
+    _verificar_clave(x_api_key)
+    return confirmar_persona(p)
+
 """
 @app.post("/registrar-desconocido")
 def registrar(p: PeticionDesconocido, x_api_key: str = Header(default="")):
