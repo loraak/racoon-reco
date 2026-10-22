@@ -64,8 +64,8 @@ class ClienteReco:
                 print(f"[cliente-reconocimiento] sin respuesta del servidor ({e})...")
             return None
 
-    def confirmar(self, camara_id, persona_id=None, embedding=None, similitud=None, calidad=None, frontalidad=None, tid=None, ruta_crop=None):
-        cuerpo = {"camara_id": camara_id, "persona_id": persona_id, "embedding": embedding, "similitud": similitud, "calidad": calidad, "frontalidad": frontalidad, "tid": tid, "ruta_crop": ruta_crop}
+    def confirmar(self, camara_id, persona_id=None, embedding=None, similitud=None, calidad=None, frontalidad=None, tid=None, id_garage=None):
+        cuerpo = {"camara_id": camara_id, "persona_id": persona_id, "embedding": embedding, "similitud": similitud, "calidad": calidad, "frontalidad": frontalidad, "tid": tid, "id_garage": id_garage}
         try:
             r = self.sesion.post(f"{self.url}/registrar", json=cuerpo, timeout=self.timeout)
             r.raise_for_status()

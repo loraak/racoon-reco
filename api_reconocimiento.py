@@ -174,7 +174,7 @@ def comparar(emb):
 def confirmar_persona(p):
     # llamado una vez por tid cuando se confirma a alguien.
     emb_texto = a_texto(p.embedding) if p.embedding is not None else None
-    meta_evento = {"tid": p.tid, "calidad": p.calidad, "frontalidad": p.frontalidad, "ruta_crop": p.ruta_crop}
+    meta_evento = {"tid": p.tid, "calidad": p.calidad, "frontalidad": p.frontalidad}
     meta_emb = {"origen": "camara", "camara_id": p.camara_id, "tid": p.tid}
 
     with conexion() as con, con.cursor() as cur:
@@ -194,7 +194,7 @@ def confirmar_persona(p):
                 similitud = float(filas[0][3])
             else:
                 persona_id = crear_desconocido(cur)
-                emb_id, _ = agregar_embedding(cur, persona_id, emb_texto, p.calidad, p.ruta_crop, meta_emb)
+                emb_id, _ = agregar_embedding(cur, persona_id, emb_texto, p.calidad, p.id_garage, meta_emb)
                 evento_id = insertar_evento(cur, "registro", persona_id, p.camara.id, rostro_persona_id=emb_id, metadata=meta_evento)
 
                 return {"accion": "registro", "persona_id": persona_id,
@@ -210,12 +210,12 @@ def confirmar_persona(p):
         resultado = {"accion": "deteccion", "persona_id": persona_id, "evento_id": evento_id}
 
         if tipo == "desconocido" and emb_texto is not None:
-            emb_id, conservado = agregar_embedding(cur, persona_id, emb_texto, p.calidad, p.ruta_crop, meta_emb)
+            emb_id, conservado = agregar_embedding(cur, persona_id, emb_texto, p.calidad, p.id_garage, meta_emb)
             if conservado:
                 insertar_evento(cur, "embedding_agregado", persona_id, p.camara_id, rostro_persona_id=emb_id, metadata=meta_evento)
             resultado["embedding"] = "agregado" if conservado else "descartado"
 
-def agregar_embedding (cur, persona_id, emb_texto, calidad, ruta_crop, metadata):
+def agregar_embedding (cur, persona_id, emb_texto, calidad, id_garage, metadata):
     # for update bloquea la fila de la persona hasta que la transacción termine.
     cur.execute("SELECT 1 FROM argos.persona_identificada WHERE id = %s FOR UPDATE", (persona_id, ))
 
@@ -226,7 +226,7 @@ def agregar_embedding (cur, persona_id, emb_texto, calidad, ruta_crop, metadata)
         " status, calidad, metadata, created_at, updated_at, created_by, updated_by) "
         "VALUES (%s, %s::vector, %s, %s, %s, 'activo', %s, %s, now(), now(), %s, %s) " 
         "RETURNING id",
-        (persona_id, emb_texto, ruta_crop or "", MODELO, DIMENSION, calidad, Json(metadata), CREADO_POR, CREADO_POR))
+        (persona_id, emb_texto, id_garage or "", MODELO, DIMENSION, calidad, Json(metadata), CREADO_POR, CREADO_POR))
     nuevo_id = cur.fetchone()[0]
 
     # ¿qué embeddings sobran?
@@ -413,7 +413,7 @@ class PeticionConfirmar(BaseModel):
     similitud: float | None = None
     calidad: float | None = None
     frontalidad: float | None = None
-    ruta_crop: str | None = None
+    id_garage: str | None = None
 
 # registra la función.
 # le dice a fastapi que ese parámetro no viene de la URL, sino de un encabezado HTTTP.

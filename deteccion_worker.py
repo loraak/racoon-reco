@@ -78,9 +78,11 @@ cliente_hd = None
 #cliente_desc = None
 fuente_global = None
 
-CAMARA_ID = int(os.getenv("CAMARA_ID", 101))
+CAMARA_ID = int(os.getenv("CAMARA_ID", 2105))
 FRONTALIDAD_MAX = 0.25
 cola_evento = queue.Queue(maxsize=8)
+
+GARAGE_ID = int(os.getenv("GARAGE_ID", 1))
 
 CARPETA_DESCONOCIDOS = "capturas_desconocidos"
 os.makedirs(CARPETA_DESCONOCIDOS, exist_ok=True)
@@ -279,7 +281,7 @@ def evento_worker():
                 print(f"[evento] error: {e}")
 
         r = cliente.confirmar(CAMARA_ID, persona_id=ev["persona_id"], embedding=ev["embedding"], similitud=ev["similitud"],
-                              calidad=ev["calidad"], frontalidad=ev["frontalidad"], tid=ev["tid"], ruta_crop=ruta_crop)
+                              calidad=ev["calidad"], frontalidad=ev["frontalidad"], tid=ev["tid"], id_garage=GARAGE_ID)
 
         if r:
             print(f"[evento] ID {ev['tid']} -> {r}")
