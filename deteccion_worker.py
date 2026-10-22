@@ -69,7 +69,7 @@ personas = {}
 personas_lock = threading.Lock()
 cola_hd = queue.Queue(maxsize=4)
 cola_reco = queue.Queue(maxsize=8)
-cola_desconocidos = queue.Queue(maxsize=4)
+#cola_desconocidos = queue.Queue(maxsize=4)
 latest_dib = []
 dib_lock = threading.Lock()
 running = True
@@ -78,6 +78,10 @@ cliente_hd = None
 #cliente_desc = None
 fuente_global = None
 
+CAMARA_ID = int(os.getenv("CAMARA_ID", 101))
+FRONTALIDAD_MAX = 0.25
+cola_evento = queue.Queue(maxsize=8)
+
 CARPETA_DESCONOCIDOS = "capturas_desconocidos"
 os.makedirs(CARPETA_DESCONOCIDOS, exist_ok=True)
 
@@ -85,7 +89,7 @@ def nuevo_estado():
     return {"votos": deque(maxlen=VENTANA_VOTOS), "nombre": "...",
             "confirmado": False, "pendiente": False, "ultimo_intento": 0.0, "visto": time.time(),
             "hd_ok": False, "hd_pendiente": False, "hd_intentos": 0, "hd_ultimo": 0.0,
-            "desconocido_guardado": False,
+            "evento_enviado": False, "pids": {},
             "mejor_embedding": None, "mejor_frontalidad": float("inf"), "mejor_crop": None, "mejor_calidad": None}
 
 # PARA ENTENDERME. Proceso hasta llegar a este método.
@@ -122,7 +126,7 @@ def decidir_nombre(st):
     st["nombre"] = nombre if st["confirmado"] else f"{nombre}?"
     # guarda el score más alto entre los votos que coinciden con la variante elegida nombre dentro del grupo ganador.
 
-def agregar_voto(tid, nombre, score, embedding=None, frontalidad=None, crop=None, calidad=None, peso=1, origen="vivo"):
+def agregar_voto(tid, nombre, score, persona_id=None, embedding=None, frontalidad=None, crop=None, calidad=None, peso=1, origen="vivo"):
     with personas_lock:
         st = personas.get(tid)
         if st is None:
@@ -138,11 +142,16 @@ def agregar_voto(tid, nombre, score, embedding=None, frontalidad=None, crop=None
         # sin que se tenga que escribir un pop() cómo una lista.
         for _ in range(peso):
             st["votos"].append((nombre, score))
+
+        if persona_id is not None:
+            st["pids"][nombre] = persona_id
+
         # llama al método para recalcular nombre, confirmado y score con el voto ya incluido.
         decidir_nombre(st)
         # si el nombre resultante cambió respecto al que tenía antes, lo imprime en consola con el origen.
         if st["nombre"] != anterior:
             print(f"[{origen}] ID {tid}: {st['nombre']} (score {score:.3f})")
+
         if embedding is not None and frontalidad is not None and frontalidad < st["mejor_frontalidad"]:
             # están separados porque c/u tiene su propia comparación.
             st["mejor_embedding"] = embedding
@@ -152,18 +161,25 @@ def agregar_voto(tid, nombre, score, embedding=None, frontalidad=None, crop=None
             st["mejor_crop"] = crop
             st["mejor_calidad"] = calidad
 
-        # condición para guardar a un desconocido -> que ya esté confirmado, que el nombre sea literalmente "Desconocido".
-        # que no se haya guardado para este track,.
-        if (st["confirmado"] and st["nombre"] == "Desconocido"
-                and not st["desconocido_guardado"]
-                and st["mejor_embedding"] is not None
-                and st["mejor_frontalidad"] <= 0.25):
-            try:
-                print(f"frontalidad -> {st["mejor_frontalidad"]}")
-                cola_desconocidos.put_nowait((tid, st["mejor_embedding"], st["mejor_crop"], st["mejor_calidad"]))
-                st["desconocido_guardado"] = True
-            except queue.Full:
-                pass
+        if not st["confirmado"] or st["evento_enviado"]:
+            return
+
+        pid = st["pids"].get(st["nombre"])
+        mejor_cara = (st["mejor_embedding"] is not None and st["mejor_frontalidad"] <= FRONTALIDAD_MAX)
+
+        # se registra solamente si la cara está de frente.
+        if pid is None and not mejor_cara:
+            return
+
+        try:
+            cola_evento.put_nowait({
+                "tid": tid, "persona_id": pid, "similitud": st["score"], "embedding": st["mejor_embedding"] if mejor_cara else None,
+                "crop": st["mejor_crop"] if mejor_cara else None, "calidad": st["mejor_calidad"], "frontalidad": st["mejor_frontalidad"],
+            })
+            st["evento_enviado"] = True
+
+        except queue.Full:
+            pass
 
 COLOR_CONFIRMADO = (0, 200, 0)
 COLOR_DESCONOCIDO = (0, 0, 255)
@@ -175,8 +191,9 @@ def color_para(st):
         return COLOR_SIN_CARA
     if not st["confirmado"]:
         return COLOR_PROVISIONAL
-    return COLOR_DESCONOCIDO if st["nombre"] == "Desconocido" else COLOR_CONFIRMADO
+    return COLOR_DESCONOCIDO if st["nombre"].startswith("Desconocido") else COLOR_CONFIRMADO
 
+"""
 def hd_worker():
     while running:
         try:
@@ -218,7 +235,7 @@ def hd_worker():
 
         if resultado:
             agregar_voto(tid, *resultado, embedding=embedding, frontalidad=frontalidad, crop=crop_hd, peso=PESO_CAP, origen="captura")
-
+"""
 
 def reco_worker():
     while running:
@@ -232,6 +249,7 @@ def reco_worker():
             r = cliente.reconocer(crop)
             if r and r.get("nombre"):
                 resultado = (r["nombre"], r["score"])
+                persona_id = r.get("persona_id")
                 embedding = r.get("embedding")
                 frontalidad = r.get("frontalidad")
                 calidad = r.get("calidad")
@@ -242,28 +260,30 @@ def reco_worker():
             if st is not None:
                 st["pendiente"] = False
         if resultado:
-            agregar_voto(tid, *resultado, embedding=embedding, crop=crop, frontalidad=frontalidad, calidad=calidad, peso=1, origen="vivo")
+            agregar_voto(tid, *resultado, persona_id = persona_id, embedding=embedding, crop=crop, frontalidad=frontalidad, calidad=calidad, peso=1, origen="vivo")
 
-def desconocido_worker():
+def evento_worker():
     while running:
         try:
-            tid, embedding, crop, calidad = cola_desconocidos.get(timeout=0.5)
-        except queue.Empty:
+            # si hay un evento en la cola, lo cala. Si no hay, espera 0.5 segundos. Si no llega nada, lanza la excepción
+            ev = cola_evento.get(timeout=0.5)
+        except queue.Emptu:
             continue
+
         ruta_crop = None
-        if crop is not None:
+        if ev["crop"] is not None:
             try:
-                ruta_crop = f"{CARPETA_DESCONOCIDOS}/{int(time.time()*1000)}_id{tid}.jpg"
-                cv2.imwrite(ruta_crop, crop)
-                print("Desconocido guardado")
+                ruta_crop = f"{CARPETA_DESCONOCIDOS}/{int(time.time()*1000)}_id{ev['tid']}.jpg"
+                cv2.imwrite(ruta_crop, ev["crop"])
             except Exception as e:
-                print(f"[desconocido] no se pudo guardar el crop -> error: {e}")
-        try:
-            r = cliente.registrar(embedding, canal = MAIN_CHANNEL, calidad=calidad, ruta_crop=ruta_crop)
-            if r:
-                print(f"[desconocido] ID {tid} -> {r}")
-        except Exception as e:
-            print(f"[desconocido] error: {e}")
+                print(f"[evento] error: {e}")
+
+        r = cliente.confirmar(CAMARA_ID, persona_id=ev["persona_id"], embedding=ev["embedding"], similitud=ev["similitud"],
+                              calidad=ev["calidad"], frontalidad=ev["frontalidad"], tid=ev["tid"], ruta_crop=ruta_crop)
+
+        if r:
+            print(f"[evento] ID {ev['tid']} -> {r}")
+
 
 def tracker_worker(fuente, detector):
     global latest_dib
@@ -402,7 +422,8 @@ def main():
     threading.Thread(target=tracker_worker, args=(fuente, detector), daemon=True).start()
     #threading.Thread(target=hd_worker, daemon=True).start()
     threading.Thread(target=reco_worker, daemon=True).start()
-    threading.Thread(target=desconocido_worker, daemon=True).start()
+    threading.Thread(target=evento_worker, daemon=True).start()
+    #threading.Thread(target=desconocido_worker, daemon=True).start()
 
     try:
         print(f"Streaming en: http://{STREAM_HOST}:{STREAM_PORT}/stream")

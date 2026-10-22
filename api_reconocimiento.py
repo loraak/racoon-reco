@@ -1,15 +1,5 @@
-import os
-
 from psycopg2.extras import Json
 from pydantic import BaseModel, Field
-
-try:
-    import openvino
-    os.add_dll_directory(os.path.join(os.path.dirname(openvino.__file__), "libs"))
-except Exception:
-    print("Hubo un error intentando usar openvino :'v")
-    pass
-
 import secrets
 import time
 from contextlib import asynccontextmanager, contextmanager
@@ -17,14 +7,10 @@ import cv2
 import numpy as np
 from fastapi import FastAPI, HTTPException, Request, Query, Header
 from starlette.concurrency import run_in_threadpool
-
-import onnxruntime as ort
-ort.set_default_logger_severity(3)
 from uniface.detection import SCRFD
 from uniface.recognition import ArcFace
 from uniface.constants import SCRFDWeights, ArcFaceWeights
 from psycopg2.pool import ThreadedConnectionPool
-
 from dotenv import load_dotenv
 import os
 
@@ -32,11 +18,10 @@ load_dotenv()
 
 HOST = "0.0.0.0"
 PORT = 8000
-
 API_KEY = os.getenv("API_KEY_RECONOCIMIENTO")
+DATABASE_ARGOS = os.getenv("DATABASE_ARGOS")
 
 MIN_LADO_CARA = 35
-
 # tamaño máximo de imagen aceptada (4 MB).
 MAX_BYTES = 4 * 1024 * 1024
 face_det = None
@@ -56,7 +41,6 @@ UMBRAL_DESCONOCIDO = 0.5
 MARGEN_MINIMO = 0.05 # ventaja del 1er lugar al 2do.
 VECINOS = 20 # x cantidad de embeddings cercanos revisa antes de elegir a la persona.
 pool_argos = None
-DATABASE_ARGOS = os.getenv("DATABASE_ARGOS")
 
 # convierte la función en algo que se usa con with "with .. as".
 @contextmanager
@@ -194,8 +178,8 @@ def agregar_embedding (cur, persona_id, emb_texto, calidad, ruta_crop, metadata)
     # devuelve el id.
     cur.execute(
         "INSERT INTO vector.rostro_persona "
-        "(persona_identificada_id, embedding, imagen_url, modelo_embedding, dimension, "
-        "status, calidad, metadata, created_at, updated_at, created_by, updated_by) "
+        "(persona_identificada_id, embedding, imagen_id, modelo_embedding, dimension, "
+        " status, calidad, metadata, created_at, updated_at, created_by, updated_by) "
         "VALUES (%s, %s::vector, %s, %s, %s, 'activo', %s, %s, now(), now(), %s, %s) " 
         "RETURNING id",
         (persona_id, emb_texto, ruta_crop or "", MODELO, DIMENSION, calidad, Json(metadata), CREADO_POR, CREADO_POR))
@@ -223,7 +207,7 @@ def agregar_embedding (cur, persona_id, emb_texto, calidad, ruta_crop, metadata)
 
     # regresa dos valores: nuevo_id: el id del embedding insertado. nuevo_id not in borrados: t/f -> si el nuevo sobrevivió/ false si era el peor y se borró.
     return nuevo_id, nuevo_id not in borrados
-
+"""
 def registrar_desconocido(emb, canal, calidad=None, ruta_crop=None):
     emb_texto = a_texto(emb)
     metadata = {"origen": "camara", "canal": canal}
@@ -252,8 +236,7 @@ def registrar_desconocido(emb, canal, calidad=None, ruta_crop=None):
         pid = cur.fetchone()[0]
         agregar_embedding(cur, pid, emb_texto, calidad, ruta_crop, metadata)
         return {"accion": "nuevo", "persona_id": pid, "nombre": f"Desconocido#{pid}"}
-
-
+"""
 UMBRAL_CONFIANZA_EMBEDDING = 0.7
 # se recibe una imagen, busca la cara + grande, la reconoce contra la base de datos y devuelve un diccionario con el resultado y CUÁNTO tardó.
 # se convierte en un JSON para quien hizo la petición.
@@ -391,11 +374,12 @@ async def reconocer(request: Request, x_api_key: str = Header(default="")):
     if img is None:
         raise HTTPException(status_code=400, detail="no se pudo decodificar la imagen")
     return await run_in_threadpool(procesar, img)
-
+"""
 @app.post("/registrar-desconocido")
 def registrar(p: PeticionDesconocido, x_api_key: str = Header(default="")):
     _verificar_clave(x_api_key)
     return registrar_desconocido(p.embedding, p.canal, p.calidad, p.ruta_crop)
+"""
 
 if __name__ == "__main__":
     import uvicorn
