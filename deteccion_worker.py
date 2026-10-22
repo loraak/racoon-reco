@@ -60,7 +60,7 @@ PESO_CAP = 3
 
 # cosas streaming.
 STREAM_HOST = "0.0.0.0"
-STREAM_PORT = 8010
+STREAM_PORT = 8015
 STREAM_FPS = 25
 STREAM_CALIDAD = 50
 
@@ -88,7 +88,7 @@ CARPETA_DESCONOCIDOS = "capturas_desconocidos"
 os.makedirs(CARPETA_DESCONOCIDOS, exist_ok=True)
 
 def nuevo_estado():
-    return {"votos": deque(maxlen=VENTANA_VOTOS), "nombre": "...",
+    return {"votos": deque(maxlen=VENTANA_VOTOS), "nombre": "...", "score": "0.0",
             "confirmado": False, "pendiente": False, "ultimo_intento": 0.0, "visto": time.time(),
             "hd_ok": False, "hd_pendiente": False, "hd_intentos": 0, "hd_ultimo": 0.0,
             "evento_enviado": False, "pids": {},
@@ -269,7 +269,7 @@ def evento_worker():
         try:
             # si hay un evento en la cola, lo cala. Si no hay, espera 0.5 segundos. Si no llega nada, lanza la excepción
             ev = cola_evento.get(timeout=0.5)
-        except queue.Emptu:
+        except queue.Empty:
             continue
 
         ruta_crop = None
