@@ -67,7 +67,7 @@ class ClienteReco:
     def confirmar(self, camara_id, persona_id=None, embedding=None, similitud=None, calidad=None, frontalidad=None, tid=None, ruta_crop=None):
         cuerpo = {"camara_id": camara_id, "persona_id": persona_id, "embedding": embedding, "similitud": similitud, "calidad": calidad, "frontalidad": frontalidad, "tid": tid, "ruta_crop": ruta_crop}
         try:
-            r = self.sesion.post(f"{self.url}/registrar", json=cuerpo, timeout=self.timeout)
+            r = self.sesion.post(f"{self.url}/confirmar", json=cuerpo, timeout=self.timeout)
             r.raise_for_status()
             return r.json()
         except (requests.RequestException, ValueError) as e:

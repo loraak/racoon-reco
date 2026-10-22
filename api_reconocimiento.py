@@ -174,8 +174,8 @@ def comparar(emb):
 def confirmar_persona(p):
     # llamado una vez por tid cuando se confirma a alguien.
     emb_texto = a_texto(p.embedding) if p.embedding is not None else None
-    meta_evento = {"tid": p.tid, "calidad": p.calidad, "frontalidad": p.frontalidad, "ruta_crop": p.ruta_crop}
-    meta_emb = {"origen": "camara", "camara_id": p.camara_id, "tid": p.tid}
+    meta_evento = {}
+    meta_emb = {"origen": "camara", "camara_id": p.camara_id}
 
     with conexion() as con, con.cursor() as cur:
         persona_id = p.persona_id
@@ -195,7 +195,7 @@ def confirmar_persona(p):
             else:
                 persona_id = crear_desconocido(cur)
                 emb_id, _ = agregar_embedding(cur, persona_id, emb_texto, p.calidad, p.ruta_crop, meta_emb)
-                evento_id = insertar_evento(cur, "registro", persona_id, p.camara.id, rostro_persona_id=emb_id, metadata=meta_evento)
+                evento_id = insertar_evento(cur, "registro", persona_id, p.camara_id, rostro_persona_id=emb_id, metadata=meta_evento)
 
                 return {"accion": "registro", "persona_id": persona_id,
                         "nombre": f"Desconocido#{persona_id}", "evento_id": evento_id}
@@ -285,6 +285,18 @@ def registrar_desconocido(emb, canal, calidad=None, ruta_crop=None):
         cur.execute("SELECT pg_advisory_xact_lock(%s)", (LOCK_REGISTRO,))
 
         filas = buscar(cur, emb_texto)
+
+        if filas:
+            top_pid, top_nombre, top_tipo, top_sim = filas[0]
+            top_sim = float(top_sim)
+            segundo_sim = float(filas[1][3]) if len(filas) > 1 else None
+            margen = (top_sim - segundo_sim) if segundo_sim is not None else None
+            print(f"[desconocido-debug] canal={canal} top=pid:{top_pid}/{top_nombre} "
+                  f"sim={top_sim:.4f} segundo={'-' if segundo_sim is None else f'{segundo_sim:.4f}'} "
+                  f"margen={'-' if margen is None else f'{margen:.4f}'} umbral={UMBRAL_DESCONOCIDO}",
+                  flush=True)
+        else:
+            print(f"[desconocido-debug] canal={canal} sin candidatos", flush=True)
 
         if filas and float(filas[0][3]) >= UMBRAL_DESCONOCIDO:
             pid, nombre, tipo, prom_top3 = filas[0]
