@@ -1,3 +1,4 @@
+import uuid
 from typing import Annotated
 
 from psycopg2.extras import Json
@@ -44,6 +45,17 @@ MARGEN_MINIMO = 0.05 # ventaja del 1er lugar al 2do.
 VECINOS = 20 # x cantidad de embeddings cercanos revisa antes de elegir a la persona.
 pool_argos = None
 
+#GARAGE
+GARAGE_ENDPOINT = os.getenv("GARAGE_ENDPOINT")
+GARAGE_KEY_ID = os.getenv("GARAGE_KEY_ID")
+GARAGE_SECRET = os.getenv("GARAGE_SECRET")
+GARAGE_BUCKET = os.getenv("GARAGE_BUCKET")
+GARAGE_REGION = os.getenv("GARAGE_REGION")
+PREFIJO_FOTOS = "rostros/"
+GARAGE_SEG = 60
+_garage_pausa_hasta = 0.0
+s3 = None
+
 # convierte la función en algo que se usa con with "with .. as".
 @contextmanager
 def conexion():
@@ -68,6 +80,33 @@ def a_texto(emb):
     emb = np.asarray(emb, dtype=np.float32).ravel()
     emb = emb / np.linalg.norm(emb)
     return str(emb.tolist())
+
+# nombres para la foto dentro del bucket.
+def nueva_llave(persona_id):
+    return f"{PREFIJO_FOTOS}{persona_id}({uuid.uuid4().hex}.jpg"
+
+def garage_activo():
+    return s3 is not None and time.time() >= _garage_pausa_hasta
+
+def subir_foto(llave, jpg):
+    global _garage_pausa_hasta
+    try:
+        s3.put_object(Bucket=GARAGE_BUCKET, Key=llave, Body=jpg, ContentType="image/jpeg")
+        return True
+    except Exception as e:
+        _garage_pausa_hasta = time.time() + GARAGE_SEG
+        print(f"[garage] no se pudo subir la foto; se guarda sin foto y se pausa "
+              f"{GARAGE_SEG}s ({e})", flush=True)
+        return False
+
+def borrar_fotos(llaves):
+    if s3 is None:
+        return
+    for llave in llaves:
+        try:
+            s3.delete_object(Bucket=GARAGE_BUCKET, Key=llave)
+        except Exception as e:
+            print(f"[garage] no se pudo borrar {llave}: {e}", flush=True)
 
 # PASO 1.
 # with, as... define tablas temporales que solo existen mientras corre la consulta.
@@ -215,9 +254,11 @@ def confirmar_persona(p):
                 insertar_evento(cur, "embedding_agregado", persona_id, p.camara_id, rostro_persona_id=emb_id, metadata=meta_evento)
             resultado["embedding"] = "agregado" if conservado else "descartado"
 
-def agregar_embedding (cur, persona_id, emb_texto, calidad, ruta_crop, metadata):
+def agregar_embedding (cur, persona_id, emb_texto, calidad, foto, metadata):
     # for update bloquea la fila de la persona hasta que la transacción termine.
     cur.execute("SELECT 1 FROM argos.persona_identificada WHERE id = %s FOR UPDATE", (persona_id, ))
+
+    llave = nueva_llave(persona_id) if (foto and garage_activo()) else None
 
     # devuelve el id.
     cur.execute(
@@ -226,7 +267,7 @@ def agregar_embedding (cur, persona_id, emb_texto, calidad, ruta_crop, metadata)
         " status, calidad, metadata, created_at, updated_at, created_by, updated_by) "
         "VALUES (%s, %s::vector, %s, %s, %s, 'activo', %s, %s, now(), now(), %s, %s) " 
         "RETURNING id",
-        (persona_id, emb_texto, ruta_crop or "", MODELO, DIMENSION, calidad, Json(metadata), CREADO_POR, CREADO_POR))
+        (persona_id, emb_texto, llave or "", MODELO, DIMENSION, calidad, Json(metadata), CREADO_POR, CREADO_POR))
     nuevo_id = cur.fetchone()[0]
 
     # ¿qué embeddings sobran?
