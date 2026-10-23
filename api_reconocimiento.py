@@ -18,7 +18,8 @@ from uniface.constants import SCRFDWeights, ArcFaceWeights
 from psycopg2.pool import ThreadedConnectionPool
 from dotenv import load_dotenv
 import os
-
+import boto3
+from botocore.config import Config
 load_dotenv()
 
 HOST = "0.0.0.0"
@@ -178,11 +179,28 @@ def buscar(cur, emb_texto):
     return cur.fetchall()
 
 def cargar_modelos():
-    global face_det, recognizer, pool_argos
+    global face_det, recognizer, pool_argos, s3
     print("Cargando modelos...")
-    face_det = SCRFD(model_name=SCRFDWeights.SCRFD_10G_KPS, confidence_threshold=0.5, input_size=(320, 320), providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
-    recognizer = ArcFace(model_name=ArcFaceWeights.RESNET, providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
-    pool_argos = ThreadedConnectionPool(1, 5, DATABASE_ARGOS)
+    if GARAGE_ENDPOINT and GARAGE_KEY_ID and GARAGE_SECRET:
+        s3 = boto3.client(
+            "s3",
+            endpoint_url=GARAGE_ENDPOINT,
+            aws_access_key_id=GARAGE_KEY_ID,
+            aws_secret_access_key=GARAGE_SECRET,
+            region_name=GARAGE_REGION,
+            config=Config(s3={"addressing_style": "path"},
+                          connect_timeout=2, read_timeout=5,
+                          retries={"max_attempts": 1}))
+        print(f"Garage: {GARAGE_ENDPOINT} (bucket {GARAGE_BUCKET})")
+    else:
+        s3 = None
+        print("Garage no configurado: los embeddings se guardarán sin foto (imagen_id = NULL)")
+    face_det = SCRFD(model_name=SCRFDWeights.SCRFD_10G_KPS, confidence_threshold=0.5,
+                     input_size=(320, 320),
+                     providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
+    recognizer = ArcFace(model_name=ArcFaceWeights.RESNET,
+                         providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
+    pool_argos = ThreadedConnectionPool(1, 5, DATABASE_ARGOS, connect_timeout=5)
     print("Listo")
 
 def cara_mas_grande(caras):
@@ -321,7 +339,7 @@ def agregar_embedding (cur, persona_id, emb_texto, calidad, foto, metadata):
         "RETURNING e.id, e.imagen_id",
         (persona_id, LIMITE_EMBEDDING)
     )
-    borrados = {f[0] for f in cur.fetchall()}
+    borrados = dict(cur.fetchall())
 
     conservado = nuevo_id not in borrados
 
@@ -470,7 +488,7 @@ class PeticionConfirmar(BaseModel):
     similitud: float | None = None
     calidad: float | None = None
     frontalidad: float | None = None
-    ruta_crop: str | None = None
+    foto_b64: str | None = Field(default=None, max_length=6_000_000)
 
 # registra la función.
 # le dice a fastapi que ese parámetro no viene de la URL, sino de un encabezado HTTTP.
