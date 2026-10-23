@@ -281,7 +281,7 @@ def evento_worker():
                 print(f"[evento] error: {e}")
 
         r = cliente.confirmar(CAMARA_ID, persona_id=ev["persona_id"], embedding=ev["embedding"], similitud=ev["similitud"],
-                              calidad=ev["calidad"], frontalidad=ev["frontalidad"], tid=ev["tid"], id_garage=GARAGE_ID)
+                              calidad=ev["calidad"], frontalidad=ev["frontalidad"], tid=ev["tid"], foto=ev["crop"])
 
         if r:
             print(f"[evento] ID {ev['tid']} -> {r}")
