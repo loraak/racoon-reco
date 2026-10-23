@@ -1,3 +1,5 @@
+import base64
+import binascii
 import uuid
 from typing import Annotated
 
@@ -196,7 +198,7 @@ def comparar(emb):
 
     # si no hay resultados, no hay a quién reconocer, regresa nadie con similitud 0.
     if not filas:
-        return None, 0.0
+        return None, None, None, 0.0
 
     # toma la primera fila (primer lugar) y reparte los 6 valores en variables. _ significa que se van a ignorar.
     pid, nombre, tipo, prom_top3 = filas[0]
@@ -210,21 +212,53 @@ def comparar(emb):
         return None, None, None, puntaje
     return pid, nombre, tipo, puntaje
 
+# decodificar foto.
+def decodificar_foto(foto_b64):
+    if not foto_b64:
+        return None
+    try:
+        jpg = base64.b64decode(foto_b64, validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(status_code=422, detail="foto_b64 no es base64")
+    if len(jpg) > MAX_BYTES:
+        raise HTTPException(status_code=413, detail="La foto es demasiado grande")
+    return jpg
+
 def confirmar_persona(p):
     # llamado una vez por tid cuando se confirma a alguien.
+    foto = decodificar_foto(p.foto_b64)
+    subidas, sobran = [], []
+    try:
+        resultado = _confirmar_en_bd(p, foto, subidas, sobran)
+    except Exception:
+        borrar_fotos(subidas)
+        raise
+    borrar_fotos(sobran)
+    return resultado
+
+def _confirmar_en_bd(p, foto, subidas, sobran):
+    #p.persona_id -> alguien ya registrado, evento detección.
+    #p.persona_id vacío -> desconocido sin registrar, se confirma otra vez.
     emb_texto = a_texto(p.embedding) if p.embedding is not None else None
     meta_evento = {}
-    meta_emb = {"origen": "camara", "camara_id": p.camara_id}
+    meta_emb = {}
+
+    def guardar_embedding(persona_id):
+        emb_id, conservado, subida, viejas = agregar_embedding(
+            cur, persona_id, emb_texto, p.calidad, foto, meta_emb
+        )
+        if subida:
+            subidas.append(subida)
+        sobran.extend(viejas)
+        return emb_id, conservado
 
     with conexion() as con, con.cursor() as cur:
         persona_id = p.persona_id
         similitud = p.similitud
 
-        # desconocido sin registrar, otra confirmación.
         if persona_id is None:
             if emb_texto is None:
-                raise HTTPException(status_code=422, detail="Falta embedding")
-
+                raise HTTPException(status_code=422, detail="se necesita embedding")
             cur.execute("SELECT pg_advisory_xact_lock(%s)", (LOCK_REGISTRO,))
             filas = buscar(cur, emb_texto)
 
@@ -233,15 +267,12 @@ def confirmar_persona(p):
                 similitud = float(filas[0][3])
             else:
                 persona_id = crear_desconocido(cur)
-                emb_id, _ = agregar_embedding(cur, persona_id, emb_texto, p.calidad, p.ruta_crop, meta_emb)
+                emb_id, _ = guardar_embedding(persona_id)
                 evento_id = insertar_evento(cur, "registro", persona_id, p.camara_id, rostro_persona_id=emb_id, metadata=meta_evento)
 
-                return {"accion": "registro", "persona_id": persona_id,
-                        "nombre": f"Desconocido#{persona_id}", "evento_id": evento_id}
+                return {"accion": "registro", "persona_id": persona_id, "nombre": f"Desconocido#{persona_id}", "evento_id": evento_id}
 
         tipo = tipo_de(cur, persona_id)
-
-        # eventp detección
         if tipo is None:
             raise HTTPException(status_code=404, detail=f"no existe la persona {persona_id}")
 
@@ -249,10 +280,12 @@ def confirmar_persona(p):
         resultado = {"accion": "deteccion", "persona_id": persona_id, "evento_id": evento_id}
 
         if tipo == "desconocido" and emb_texto is not None:
-            emb_id, conservado = agregar_embedding(cur, persona_id, emb_texto, p.calidad, p.ruta_crop, meta_emb)
+            emb_id, conservado = guardar_embedding(persona_id)
             if conservado:
                 insertar_evento(cur, "embedding_agregado", persona_id, p.camara_id, rostro_persona_id=emb_id, metadata=meta_evento)
             resultado["embedding"] = "agregado" if conservado else "descartado"
+
+        return resultado
 
 def agregar_embedding (cur, persona_id, emb_texto, calidad, foto, metadata):
     # for update bloquea la fila de la persona hasta que la transacción termine.
@@ -285,10 +318,23 @@ def agregar_embedding (cur, persona_id, emb_texto, calidad, foto, metadata):
         "       OFFSET %s "
         ") sobrantes "
         "WHERE e.id = sobrantes.id "
-        "RETURNING e.id",
+        "RETURNING e.id, e.imagen_id",
         (persona_id, LIMITE_EMBEDDING)
     )
     borrados = {f[0] for f in cur.fetchall()}
+
+    conservado = nuevo_id not in borrados
+
+    sobran = [k for i, k in borrados.items() if i != nuevo_id and k and k.startswith(PREFIJO_FOTOS)]
+
+    subida = None
+    if conservado and llave:
+        if subir_foto(llave, foto):
+            subida = llave
+        else:
+            cur.execute("UPDATE vector.rostro_persona SET imagen_id = NULL where id = %s",
+                        (nuevo_id,))
+    return nuevo_id, conservado, subida, sobran
 
     # regresa dos valores: nuevo_id: el id del embedding insertado. nuevo_id not in borrados: t/f -> si el nuevo sobrevivió/ false si era el peor y se borró.
     return nuevo_id, nuevo_id not in borrados
@@ -316,48 +362,6 @@ def insertar_evento(cur, tipo, persona_id, camara_id, similitud=None, rostro_per
     )
     return cur.fetchone()[0]
 
-"""
-def registrar_desconocido(emb, canal, calidad=None, ruta_crop=None):
-    emb_texto = a_texto(emb)
-    metadata = {"origen": "camara", "canal": canal}
-
-    with conexion() as con, con.cursor() as cur:
-        # acá se hace uso de la llave número que definimos antes...
-        cur.execute("SELECT pg_advisory_xact_lock(%s)", (LOCK_REGISTRO,))
-
-        filas = buscar(cur, emb_texto)
-
-        if filas:
-            top_pid, top_nombre, top_tipo, top_sim = filas[0]
-            top_sim = float(top_sim)
-            segundo_sim = float(filas[1][3]) if len(filas) > 1 else None
-            margen = (top_sim - segundo_sim) if segundo_sim is not None else None
-            print(f"[desconocido-debug] canal={canal} top=pid:{top_pid}/{top_nombre} "
-                  f"sim={top_sim:.4f} segundo={'-' if segundo_sim is None else f'{segundo_sim:.4f}'} "
-                  f"margen={'-' if margen is None else f'{margen:.4f}'} umbral={UMBRAL_DESCONOCIDO}",
-                  flush=True)
-        else:
-            print(f"[desconocido-debug] canal={canal} sin candidatos", flush=True)
-
-        if filas and float(filas[0][3]) >= UMBRAL_DESCONOCIDO:
-            pid, nombre, tipo, prom_top3 = filas[0]
-            similitud = round(float(prom_top3), 4)
-
-            if tipo == "conocido":
-                return {"accion": "es_conocido", "persona_id": pid, "nombre": nombre, "similitud": similitud}
-
-            _, conservado = agregar_embedding(cur, pid, emb_texto, calidad, ruta_crop, metadata)
-            return {"accion": "agregado" if conservado else "descartado", "persona_id": pid, "nombre": nombre, "similitud": similitud}
-
-        # persona nueva.
-        cur.execute("INSERT INTO argos.persona_identificada "
-                    "(tipo, status, created_at, updated_at, created_by, updated_by) "
-                    "VALUES ('desconocido', 'activo', now(), now(), %s, %s) RETURNING id",
-                    (CREADO_POR, CREADO_POR))
-        pid = cur.fetchone()[0]
-        agregar_embedding(cur, pid, emb_texto, calidad, ruta_crop, metadata)
-        return {"accion": "nuevo", "persona_id": pid, "nombre": f"Desconocido#{pid}"}
-"""
 UMBRAL_CONFIANZA_EMBEDDING = 0.7
 # se recibe una imagen, busca la cara + grande, la reconoce contra la base de datos y devuelve un diccionario con el resultado y CUÁNTO tardó.
 # se convierte en un JSON para quien hizo la petición.
