@@ -1,3 +1,4 @@
+import base64
 import time
 import cv2
 import requests
@@ -64,8 +65,14 @@ class ClienteReco:
                 print(f"[cliente-reconocimiento] sin respuesta del servidor ({e})...")
             return None
 
-    def confirmar(self, camara_id, persona_id=None, embedding=None, similitud=None, calidad=None, frontalidad=None, tid=None, id_garage=None):
-        cuerpo = {"camara_id": camara_id, "persona_id": persona_id, "embedding": embedding, "similitud": similitud, "calidad": calidad, "frontalidad": frontalidad, "tid": tid, "id_garage": id_garage}
+    def confirmar(self, camara_id, persona_id=None, embedding=None, similitud=None, calidad=None, frontalidad=None, tid=None, foto=None):
+        foto_b64 = None
+        if foto is not None:
+            ok, buf = cv2.imencode(".jpg", foto, [cv2.IMWRITE_JPEG_QUALITY, self.calidad])
+            if ok:
+                foto_b64 = base64.b64encode(buf.tobytes()).decode("ascii")
+
+        cuerpo = {"camara_id": camara_id, "persona_id": persona_id, "embedding": embedding, "similitud": similitud, "calidad": calidad, "frontalidad": frontalidad, "tid": tid, "foto_b64": foto_b64}
         try:
             r = self.sesion.post(f"{self.url}/confirmar", json=cuerpo, timeout=self.timeout)
             r.raise_for_status()
