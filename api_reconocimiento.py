@@ -236,6 +236,10 @@ def confirmar_persona(p):
     borrar_fotos(sobran)
     return resultado
 
+# p -> petición del worker (petición confirmar).
+# foto -> jpeg ya convertido en bytes.
+# subidas -> lista que va a llenarse con las fotos que suba garage.
+# sobran -> lista que va llenándose con fotos de Garage que ya no se usan.
 def _confirmar_en_bd(p, foto, subidas, sobran):
     #p.persona_id -> alguien ya registrado, evento detección.
     #p.persona_id vacío -> desconocido sin registrar, se confirma otra vez.
@@ -243,6 +247,10 @@ def _confirmar_en_bd(p, foto, subidas, sobran):
     meta_evento = {}
     meta_emb = {}
 
+    # emb_id -> el id del embedding nuevo.
+    # conservado -> si sobrevivió al límite.
+    # subida -> la llave de la foto que subió o nadota.
+    # viejas -> las llaves de fotos de embeddings que el límite borró.
     def guardar_embedding(persona_id):
         emb_id, conservado, subida, viejas = agregar_embedding(
             cur, persona_id, emb_texto, p.calidad, foto, meta_emb
@@ -256,15 +264,21 @@ def _confirmar_en_bd(p, foto, subidas, sobran):
         persona_id = p.persona_id
         similitud = p.similitud
 
+        # el worker confirmí "Desconocido" sin número.
         if persona_id is None:
             if emb_texto is None:
                 raise HTTPException(status_code=422, detail="se necesita embedding")
             cur.execute("SELECT pg_advisory_xact_lock(%s)", (LOCK_REGISTRO,))
+            # busca otra vez con el mejor embedding que mandó el worker.
             filas = buscar(cur, emb_texto)
 
+            # sí se parece a alguien, toma persona_id y lo trata como una detección normal.
             if filas and float(filas[0][3]) >= UMBRAL_DESCONOCIDO:
                 persona_id = filas[0][0]
                 similitud = float(filas[0][3])
+            # segurísimo de paris que no se parece, crea la persona con tipo "desconocido".
+            # guarda el primer embedding y foto, _ es para conservado ya que siendo el primero siempre se conserva.
+            # inserta el evento de registro.
             else:
                 persona_id = crear_desconocido(cur)
                 emb_id, _ = guardar_embedding(persona_id)
@@ -276,9 +290,11 @@ def _confirmar_en_bd(p, foto, subidas, sobran):
         if tipo is None:
             raise HTTPException(status_code=404, detail=f"no existe la persona {persona_id}")
 
+        # inserta el evento deteccion con la similitud.
         evento_id = insertar_evento(cur, "deteccion", persona_id, p.camara_id, similitud=similitud, metadata=meta_evento)
         resultado = {"accion": "deteccion", "persona_id": persona_id, "evento_id": evento_id}
 
+        # solo si es desconocido y llegó un embedding, se suma la foto... se tendría que corregir esto en realidad.
         if tipo == "desconocido" and emb_texto is not None:
             emb_id, conservado = guardar_embedding(persona_id)
             if conservado:
